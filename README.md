@@ -54,3 +54,47 @@ The system will automatically create a new file named `LOG_000.CSV` (incrementin
 When you pull the SD card and open the CSV in Excel or a data analysis tool, you will see a continuous X-axis timeline of system uptime in seconds (`Uptime_s`), accompanied by the min, max, and average brightness for that second. The `Read_Count` column tracks system health—it should show roughly the same number of sensor reads every second (i.e., Hz).
 
 To spot a momentary flicker, simply look for severe dips in the `Min_Light` column.
+
+
+## Data Analysis
+
+To find the exact moments the fixture flickered, use the provided R script (`analyze-csv-for-flickers.R`). This script scans your SD card data, filters out normal operation and intentional power-downs, and isolates the specific seconds where an abrupt drop in light intensity occurred.
+
+### Prerequisites
+You will need to have [R](https://cran.r-project.org/) installed on your computer. 
+
+You will also need to install the required libraries. Open your R console or RStudio and run this once:
+```r
+install.packages(c("dplyr", "readr", "purrr"))
+```
+
+### Running the Analysis
+The easiest way to process your data is directly from your computer's terminal or command prompt using `Rscript`.
+
+1. Remove the MicroSD card from your Arduino and plug it into your computer.
+2. Copy all of the `LOG_XXX.CSV` files from the SD card into a single folder on your computer.
+3. Save the `analyze-csv-for-flickers.R` script into that exact same folder.
+4. Open your terminal/command prompt and navigate to that folder:
+   ```bash
+   cd path/to/your/folder
+   ```
+5. Execute the script:
+   ```bash
+   Rscript analyze-csv-for-flickers.R
+   ```
+
+### Reading the Output
+The script will automatically stitch all of your daily log files together in chronological order, run the analysis, and print a summary table directly to your terminal. 
+
+The output will look like this:
+
+```text
+# A tibble: 2 x 7
+  filename    Uptime_s Min_Light Max_Light Avg_Light Read_Count is_flicker
+  <chr>          <int>     <int>     <int>     <int>      <int> <lgl>     
+1 LOG_000.CSV      300       120       814       450       8150 TRUE      
+2 LOG_000.CSV     4080       110       812       420       8132 TRUE      
+```
+
+* **filename & Uptime_s:** The exact file and second the flicker occurred.
+* **Min_Light:** This number will be exceptionally low (below 150), proving the DMX fixture went dark while the `Max_Light` for that same second confirms it was otherwise supposed to be fully powered on.
