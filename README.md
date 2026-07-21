@@ -98,5 +98,5 @@ The output will look like this:
 2 LOG_000.CSV          0     4080       110       818       420       8162 TRUE
 ```
 
-* **filename & Uptime_s:** The exact file and second the flicker occurred.
+* **filename** & **Uptime_s:** The exact file and second the flicker occurred.
 * **Min_Light:** This number will be exceptionally low (below 150), proving the DMX fixture went dark while the `Max_Light` for that same second confirms it was otherwise supposed to be fully powered on.
