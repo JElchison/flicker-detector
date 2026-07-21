@@ -1,6 +1,6 @@
-library(dplyr)
-library(readr)
-library(purrr)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(readr))
+suppressPackageStartupMessages(library(purrr))
 
 # --- 1. Define Thresholds ---
 DARK_THRESH   <- 150  

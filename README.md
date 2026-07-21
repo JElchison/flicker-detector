@@ -82,7 +82,7 @@ The easiest way to process your data is directly from your computer's terminal o
    ```
 5. Execute the script:
    ```bash
-   Rscript analyze-csv-for-flickers.R
+   Rscript --vanilla analyze-csv-for-flickers.R
    ```
 
 ### Reading the Output
