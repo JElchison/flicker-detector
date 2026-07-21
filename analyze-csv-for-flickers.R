@@ -68,4 +68,6 @@ df_analyzed <- df |>
 # --- 4. VIEW THE EVIDENCE ---
 # Extract and print only the rows where a flicker was confirmed
 flicker_events <- df_analyzed |> filter(is_flicker == TRUE)
+# don't truncate
+options(width = 100)
 print(flicker_events)

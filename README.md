@@ -91,11 +91,11 @@ The script will automatically stitch all of your daily log files together in chr
 The output will look like this:
 
 ```text
-# A tibble: 2 x 7
-  filename    Uptime_s Min_Light Max_Light Avg_Light Read_Count is_flicker
-  <chr>          <int>     <int>     <int>     <int>      <int> <lgl>     
-1 LOG_000.CSV      300       120       814       450       8150 TRUE      
-2 LOG_000.CSV     4080       110       812       420       8132 TRUE      
+# A tibble: 2 × 8
+  filename    session_id Uptime_s Min_Light Max_Light Avg_Light Read_Count is_flicker
+  <chr>            <int>    <dbl>     <dbl>     <dbl>     <dbl>      <dbl> <lgl>
+1 LOG_000.CSV          0      300       120       822       450       8103 TRUE
+2 LOG_000.CSV          0     4080       110       818       420       8162 TRUE
 ```
 
 * **filename & Uptime_s:** The exact file and second the flicker occurred.
