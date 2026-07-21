@@ -7,6 +7,8 @@ Standard visual observation or low-speed logging can miss microsecond dropouts. 
 
 If the light momentarily flickers, the `Min_Light` value for that second will plummet, leaving an undeniable, timestamped record in the CSV file.
 
+<img width="1231" height="927" alt="image" src="https://github.com/user-attachments/assets/217aab56-abfd-4860-a5b9-d3e3887bdaa6" />
+
 ## Hardware List
 This build uses a "stacked" approach with an Ethernet Shield to avoid needing a breadboard, making the unit compact and durable.
 
