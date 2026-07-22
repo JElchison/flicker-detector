@@ -10,21 +10,28 @@ const unsigned long WINDOW_SIZE_US = 2000;
 
 // Pin assignments
 const int chipSelect = 4;
-const int lightPin = A0;
 const int statusLed = 7; // External LED for heartbeat
+
+const uint8_t SENSOR_COUNT = 2;
+const uint8_t sensorPins[SENSOR_COUNT] = {A0, A1};
 
 File logFile;
 
-// 1-Second Aggregates
-int minVal = 1023;  // analog max
-int maxVal = 0;  // analog min
-unsigned long sumVal = 0;
-unsigned long readCount = 0;
+struct SensorStats {
+  uint8_t address;
+  uint8_t pin;
+  int minVal;
+  int maxVal;
+  unsigned long sumVal;
+  unsigned long readCount;
+  unsigned long windowSum;
+  unsigned int windowReads;
+};
 
-// Tumbling Window Variables
+SensorStats sensors[SENSOR_COUNT];
+
+// Shared tumbling-window timer
 unsigned long windowStartTime_us = 0;
-unsigned long windowSum = 0;
-unsigned int windowReads = 0;
 
 // Non-blocking timer variables
 unsigned long lastLogTime_ms = 0;
@@ -36,6 +43,78 @@ const unsigned long ONE_DAY_MS = (unsigned long) (24UL * 60UL * 60UL * 1000UL); 
 unsigned long lastRolloverTime_ms = 0;
 char currentFileName[13]; // Buffer to hold "LOG_XXX.CSV"
 int fileIndex = 0;
+
+void resetSecondAggregates(SensorStats &sensor) {
+  sensor.minVal = 1023;
+  sensor.maxVal = 0;
+  sensor.sumVal = 0;
+  sensor.readCount = 0;
+}
+
+void resetWindowAggregates(SensorStats &sensor) {
+  sensor.windowSum = 0;
+  sensor.windowReads = 0;
+}
+
+void initSensor(SensorStats &sensor, uint8_t address, uint8_t pin) {
+  sensor.address = address;
+  sensor.pin = pin;
+  resetSecondAggregates(sensor);
+  resetWindowAggregates(sensor);
+}
+
+void initSensors() {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    initSensor(sensors[i], i, sensorPins[i]);
+  }
+}
+
+int averageOrZero(unsigned long sum, unsigned long count) {
+  return (count == 0) ? 0 : (sum / count);
+}
+
+void sampleSensor(SensorStats &sensor) {
+  int currentLight = analogRead(sensor.pin);
+  sensor.sumVal += currentLight;
+  sensor.readCount++;
+  sensor.windowSum += currentLight;
+  sensor.windowReads++;
+}
+
+void applyWindowAverage(SensorStats &sensor) {
+  if (sensor.windowReads == 0) {
+    return;
+  }
+
+  int windowAvg = sensor.windowSum / sensor.windowReads;
+  if (windowAvg < sensor.minVal) { sensor.minVal = windowAvg; }
+  if (windowAvg > sensor.maxVal) { sensor.maxVal = windowAvg; }
+  resetWindowAggregates(sensor);
+}
+
+void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &sensor) {
+  int avgVal = averageOrZero(sensor.sumVal, sensor.readCount);
+
+  file.print(currentTime_s);
+  file.print(",");
+  file.print(sensor.address);
+  file.print(",");
+  file.print(sensor.minVal);
+  file.print(",");
+  file.print(sensor.maxVal);
+  file.print(",");
+  file.print(avgVal);
+  file.print(",");
+  file.println(sensor.readCount); // Hz
+
+  Serial.print("File: "); Serial.print(currentFileName);
+  Serial.print(" | Addr: "); Serial.print(sensor.address);
+  Serial.print(" | Uptime: "); Serial.print(currentTime_s);
+  Serial.print("s | Min: "); Serial.print(sensor.minVal);
+  Serial.print(" | Max: "); Serial.print(sensor.maxVal);
+  Serial.print(" | Avg: "); Serial.print(avgVal);
+  Serial.print(" | Reads: "); Serial.println(sensor.readCount);
+}
 
 // Helper function to trigger the error state
 void triggerError() {
@@ -59,7 +138,7 @@ void createNewLogFile() {
   logFile = SD.open(currentFileName, FILE_WRITE);
   if (logFile) {
     // Just the clean CSV column headers, no extra text
-    logFile.println("Uptime_s,Min_Light,Max_Light,Avg_Light,Read_Count");
+    logFile.println("Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count");
     logFile.close();
     Serial.print("Created new log file: ");
     Serial.println(currentFileName);
@@ -85,6 +164,8 @@ void setup() {
     triggerError();
   }
   Serial.println("SD card initialized.");
+
+  initSensors();
   createNewLogFile();
 
   // Initialize the microsecond timer
@@ -109,69 +190,40 @@ void loop() {
     createNewLogFile();
   }
 
-  // 3. READ LIGHT SENSOR
-  int currentLight = analogRead(lightPin);
-
-  // Add to the global 1-second total (for the Avg_Light column)
-  sumVal += currentLight;
-  readCount++;
-
-  // Add to the micro-window bucket
-  windowSum += currentLight;
-  windowReads++;
+  // 3. READ BOTH LIGHT SENSORS
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    sampleSensor(sensors[i]);
+  }
 
   // 4. EVALUATE TUMBLING WINDOW
   // If the micro-bucket has reached its time limit
   if (currentTime_us - windowStartTime_us >= WINDOW_SIZE_US) {
-
-    // Calculate the smoothed brightness over the last window
-    int windowAvg = (windowReads == 0) ? 0 : (windowSum / windowReads);
-
-    // Update the 1-second Min/Max using the smoothed values, not raw reads
-    if (windowAvg < minVal) { minVal = windowAvg; }
-    if (windowAvg > maxVal) { maxVal = windowAvg; }
-
-    // Reset the bucket for the next window
-    windowSum = 0;
-    windowReads = 0;
+    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+      applyWindowAverage(sensors[i]);
+    }
     windowStartTime_us = currentTime_us;
   }
 
-  // 5. LOG DATA EVERY 1 SECOND
+  // 5. LOG DATA EVERY 1 SECOND (single SD open/close cycle)
   if (currentTime_ms - lastLogTime_ms >= 1000) {
     lastLogTime_ms = currentTime_ms;
 
     unsigned long currentTime_s = currentTime_ms / 1000;
-    int avgVal = (readCount == 0) ? 0 : (sumVal / readCount);
 
     logFile = SD.open(currentFileName, FILE_WRITE);
     if (logFile) {
-      logFile.print(currentTime_s);
-      logFile.print(",");
-      logFile.print(minVal);
-      logFile.print(",");
-      logFile.print(maxVal);
-      logFile.print(",");
-      logFile.print(avgVal);
-      logFile.print(",");
-      logFile.println(readCount); // Hz
+      for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+        writeSensorRow(logFile, currentTime_s, sensors[i]);
+      }
       logFile.close();
     } else {
       Serial.println("Error writing to file during loop");
       triggerError();
     }
 
-    Serial.print("File: "); Serial.print(currentFileName);
-    Serial.print("Uptime: "); Serial.print(currentTime_s);
-    Serial.print("s | Min: "); Serial.print(minVal);
-    Serial.print(" | Max: "); Serial.print(maxVal);
-    Serial.print(" | Avg: "); Serial.print(avgVal);
-    Serial.print(" | Reads: "); Serial.println(readCount);
-
-    // Reset 1-second aggregates
-    minVal = 1023;
-    maxVal = 0;
-    sumVal = 0;
-    readCount = 0;
+    // Reset per-sensor 1-second aggregates
+    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+      resetSecondAggregates(sensors[i]);
+    }
   }
 }

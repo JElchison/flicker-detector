@@ -4,7 +4,7 @@
 
 This project is an Arduino-based diagnostic tool designed to definitively prove and track high-speed dropouts (flickers) in a DMX LED light fixture over long periods. 
 
-Standard visual observation or low-speed logging can miss microsecond dropouts. To solve this, the microcontroller continuously polls an ultra-fast phototransistor as fast as its processor allows (thousands of times per second). Every second, it calculates the **Minimum**, **Maximum**, and **Average** light levels across that second's sampling window and writes a single line of data to a MicroSD card. 
+Standard visual observation or low-speed logging can miss microsecond dropouts. To solve this, the microcontroller continuously polls ultra-fast phototransistors as fast as its processor allows (thousands of times per second). Every second, it calculates the **Minimum**, **Maximum**, and **Average** light levels across that second's sampling window for each sensor address and writes both rows in a single SD write cycle. 
 
 If the light momentarily flickers, the `Min_Light` value for that second will plummet, leaving an undeniable, timestamped record in the CSV file.
 
@@ -21,7 +21,7 @@ This build uses a "stacked" approach with an Ethernet Shield to avoid needing a 
 
 * **Arduino Uno R3** (The main microcontroller)
 * **Arduino Ethernet Shield R3** (Used strictly for its built-in MicroSD card slot)
-* **[TEMT6000 Light Sensor](https://a.co/d/0hPdW3Q8)** - *Note: The TEMT6000 phototransistor is required over a standard LDR because standard photoresistors react too slowly to catch rapid LED flickers.*
+* **1x or 2x [TEMT6000 Light Sensor](https://a.co/d/0hPdW3Q8)** - *Note: The TEMT6000 phototransistor is required over a standard LDR because standard photoresistors react too slowly to catch rapid LED flickers.*
 * **MicroSD Card (Max 32GB)** - *Must be formatted to FAT32. The Arduino cannot read exFAT formatted cards (64GB+).*
 * **[Jumper Wires](https://a.co/d/01HLrKq2)** - *Used to connect the sensors directly to the top of the stacked shield.*
 * **Standard LED (Any color, 3mm or 5mm)** - *Used as a visual status heartbeat.*
@@ -34,11 +34,18 @@ This build uses a "stacked" approach with an Ethernet Shield to avoid needing a 
 1. **Stack the Boards:** Firmly press the Arduino Ethernet Shield R3 down onto the headers of the Arduino Uno R3. All wiring will be done on the top black female headers of the Ethernet Shield.
 2. **Insert SD Card:** Push your FAT32-formatted MicroSD card into the slot on the shield.
 
-### The Light Sensor (TEMT6000)
-Using three jumper wires, connect the sensor directly to the shield:
+### The Light Sensors (TEMT6000)
+Use two sensors so you can monitor two fixture points/channels at once. The logger writes each sensor as a separate row with an `Address` value.
+
+#### Sensor Address 0 (A0)
 * **VCC** -> Shield **5V**
 * **GND** -> Shield **GND** *(Use the GND pin next to 5V)*
-* **SIG** -> Shield **A0** *(Analog In 0)*
+* **SIG** -> Shield **A0** *(Analog In 0, logged as `Address=0`)*
+
+#### Sensor Address 1 (A1)
+* **VCC** -> Shield **5V**
+* **GND** -> Shield **GND** *(Any shared GND is fine)*
+* **SIG** -> Shield **A1** *(Analog In 1, logged as `Address=1`)*
 
 ### The Status Heartbeat (External LED)
 This LED will blink at 1Hz when the system is logging correctly, or lock on a solid light if there is an SD card error. To wire it inline without a breadboard:
@@ -57,11 +64,17 @@ This LED will blink at 1Hz when the system is logging correctly, or lock on a so
 
 ## Reading the Data
 
-To capture a flicker, tape the sensor flat against the light fixture's lens. Plug the Arduino into a USB wall adapter to power it.
+To capture a flicker, tape each sensor flat against a light fixture lens (or two different fixtures/channels). Plug the Arduino into a USB wall adapter to power it.
 
 The system will automatically create a new file named `LOG_000.CSV` (incrementing on each reboot or every 24 hours). 
 
-When you pull the SD card and open the CSV in Excel or a data analysis tool, you will see a continuous X-axis timeline of system uptime in hours:minutes:seconds (`Uptime_hms`), accompanied by the min, max, and average brightness for that second. The `Read_Count` column tracks system health—it should show roughly the same number of sensor reads every second (i.e., Hz).
+Each CSV row now includes an `Address` column:
+* `Address=0` corresponds to **A0**
+* `Address=1` corresponds to **A1**
+
+`Uptime_s` in the CSV is raw uptime in seconds. The R script converts this into `Uptime_hms` for human-readable reporting.
+
+The `Read_Count` column tracks system health per address - it should show roughly the same number of sensor reads every second (i.e., Hz).
 
 To spot a momentary flicker, simply look for severe dips in the `Min_Light` column.
 
@@ -95,15 +108,26 @@ The easiest way to process your data is directly from your computer's terminal o
 ### Reading the Output
 The script will automatically stitch all of your daily log files together in chronological order, run the analysis, and print a summary table directly to your terminal. 
 
+It analyzes each address independently and prints a plain-text section header before each result table.
+
 The output will look like this:
 
 ```text
+=== Address 0 ===
 # A tibble: 2 × 7
   filename    Uptime_hms Min_Light Max_Light Avg_Light Read_Count is_flicker
-  <chr>       <chr>          <dbl>     <dbl>     <dbl>      <dbl> <lgl>
-1 LOG_000.CSV 0:05:00          120       822       450       8103 TRUE
-2 LOG_000.CSV 1:08:00          110       818       420       8162 TRUE
+  <chr>       <chr>          <dbl>     <dbl>     <dbl>      <dbl> <lgl>     
+1 LOG_000.CSV 0:05:00           20       808       450       8176 TRUE      
+2 LOG_000.CSV 1:08:00           15       817       420       8141 TRUE      
+
+=== Address 1 ===
+# A tibble: 2 × 7
+  filename    Uptime_hms Min_Light Max_Light Avg_Light Read_Count is_flicker
+  <chr>       <chr>          <dbl>     <dbl>     <dbl>      <dbl> <lgl>     
+1 LOG_000.CSV 0:15:00           18       806       430       8122 TRUE      
+2 LOG_000.CSV 1:00:00           12       816       410       8108 TRUE      
 ```
 
 * **filename** & **Uptime_hms:** The exact file and second the flicker occurred.
+* **Address:** Which analog input detected it (`0` for A0, `1` for A1).
 * **Min_Light:** This number will be exceptionally low (below 150), proving the DMX fixture went dark while the `Max_Light` for that same second confirms it was otherwise supposed to be fully powered on.

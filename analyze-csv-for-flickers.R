@@ -8,90 +8,117 @@ DARK_THRESH   <- 50
 BRIGHT_THRESH <- 300
 ABRUPT_DIFF   <- 250
 
-# --- 2. Load the Data ---
-# Find all files matching the "LOG_NNN.CSV" pattern in the working directory
-file_list <- list.files(pattern = "^LOG_[0-9]{3}\\.CSV$", full.names = TRUE)
+# --- 2. Load and Normalize Data ---
+required_cols <- c("Uptime_s", "Min_Light", "Max_Light", "Avg_Light", "Read_Count")
+result_cols <- c("filename", "Uptime_hms", "Min_Light", "Max_Light", "Avg_Light", "Read_Count", "is_flicker")
 
-# Force strict column types so empty files don't default to 'character'
-log_col_types <- cols(
-  Uptime_s = col_double(),
-  Min_Light = col_double(),
-  Max_Light = col_double(),
-  Avg_Light = col_double(),
-  Read_Count = col_double()
-)
-
-# Read files safely, discarding any that contain zero data rows
-df <- map_dfr(file_list, function(file) {
-  temp_df <- read_csv(file, col_types = log_col_types)
+load_one_log <- function(file) {
+  temp_df <- read_csv(file, show_col_types = FALSE, progress = FALSE)
 
   if (nrow(temp_df) == 0) {
-    return(NULL) # map_dfr will gracefully ignore NULL returns
+    return(NULL)
   }
 
-  temp_df %>% mutate(filename = basename(file))
+  if (!all(required_cols %in% names(temp_df))) {
+    warning(sprintf("Skipping %s (missing required columns).", basename(file)))
+    return(NULL)
+  }
+
+  # Backward compatibility with older logs that did not include Address.
+  if (!("Address" %in% names(temp_df))) {
+    temp_df <- temp_df |> mutate(Address = 0)
+  }
+
+  temp_df |>
+    transmute(
+      filename = basename(file),
+      Uptime_s = as.double(.data$Uptime_s),
+      Address = as.integer(.data$Address),
+      Min_Light = as.double(.data$Min_Light),
+      Max_Light = as.double(.data$Max_Light),
+      Avg_Light = as.double(.data$Avg_Light),
+      Read_Count = as.double(.data$Read_Count)
+    )
+}
+
+load_logs <- function() {
+  file_list <- list.files(pattern = "^LOG_[0-9]{3}\\.CSV$", full.names = TRUE)
+
+  if (length(file_list) == 0) {
+    stop("No LOG_XXX.CSV files found in the current directory.")
+  }
+
+  df <- map_dfr(file_list, load_one_log)
+  if (nrow(df) == 0) {
+    stop("No usable data rows found in LOG_XXX.CSV files.")
+  }
+
+  df
+}
+
+# --- 3. Analyze One Address ---
+analyze_one_address <- function(df, address_value) {
+  df |>
+    filter(.data$Address == address_value) |>
+    arrange(.data$filename, .data$Uptime_s) |>
+    mutate(
+      time_gap = .data$Uptime_s - lag(.data$Uptime_s, default = first(.data$Uptime_s)),
+      is_new_session = .data$time_gap < 0 | .data$time_gap > 5,
+      session_id = cumsum(.data$is_new_session)
+    ) |>
+    group_by(.data$filename, .data$session_id) |>
+    mutate(
+      was_bright = lag(.data$Max_Light, 1, default = 0) > BRIGHT_THRESH |
+                   lag(.data$Max_Light, 2, default = 0) > BRIGHT_THRESH,
+      returns_bright = lead(.data$Max_Light, 1, default = 0) > BRIGHT_THRESH |
+                       lead(.data$Max_Light, 2, default = 0) > BRIGHT_THRESH |
+                       lead(.data$Max_Light, 3, default = 0) > BRIGHT_THRESH,
+      abrupt_intra = (.data$Max_Light > BRIGHT_THRESH) & (.data$Min_Light < DARK_THRESH),
+      abrupt_drop = (lag(.data$Avg_Light, 1, default = 0) - .data$Avg_Light) > ABRUPT_DIFF,
+      abrupt_rise = (.data$Avg_Light - lag(.data$Avg_Light, 1, default = 0)) > ABRUPT_DIFF,
+      is_flicker = (.data$Min_Light < DARK_THRESH) &
+                   .data$was_bright &
+                   .data$returns_bright &
+                   (.data$abrupt_intra | .data$abrupt_drop | .data$abrupt_rise |
+                    lag(.data$abrupt_intra, 1, default = FALSE) | lead(.data$abrupt_intra, 1, default = FALSE)),
+      is_powered_off = (.data$Max_Light < DARK_THRESH) & !.data$was_bright & !.data$returns_bright
+    ) |>
+    ungroup() |>
+    filter(!.data$is_powered_off) |>
+    mutate(
+      hours = floor(.data$Uptime_s / 3600),
+      minutes = floor((.data$Uptime_s %% 3600) / 60),
+      seconds = .data$Uptime_s %% 60,
+      Uptime_hms = sprintf("%d:%02d:%02d", .data$hours, .data$minutes, .data$seconds)
+    ) |>
+    select(all_of(result_cols))
+}
+
+print_flicker_table <- function(flicker_df, address_value) {
+  cat("\n=== Address", address_value, "===\n")
+  if (nrow(flicker_df) == 0) {
+    cat("No flickers detected.\n")
+    return(invisible(NULL))
+  }
+
+  print(flicker_df, n = Inf)
+  invisible(NULL)
+}
+
+# --- 4. Run Analysis for All Addresses ---
+df <- load_logs()
+address_values <- sort(unique(df$Address))
+
+analysis_by_address <- map(address_values, function(addr) {
+  analyze_one_address(df, addr)
 })
 
-# --- 3. Analyze and Filter ---
-df_analyzed <- df |>
-  arrange(filename, Uptime_s) |>
+flickers_by_address <- map(analysis_by_address, function(tbl) {
+  tbl |> filter(is_flicker)
+})
 
-  # -- ISOLATE POWER CYCLES --
-  mutate(
-    # Check the gap between this row's time and the previous row's time
-    time_gap = Uptime_s - lag(Uptime_s, default = first(Uptime_s)),
-    # It's a new session if time went backward (reboot) or jumped > 5 seconds (unplugged)
-    is_new_session = time_gap < 0 | time_gap > 5,
-    # Create a unique ID for each continuous block of time
-    session_id = cumsum(is_new_session)
-  ) |>
+walk2(flickers_by_address, address_values, print_flicker_table)
 
-  # Force lag() and lead() to stay within the current continuous session
-  group_by(session_id) |>
-
-  mutate(
-    # Establish context
-    was_bright = lag(Max_Light, 1, default = 0) > BRIGHT_THRESH |
-                 lag(Max_Light, 2, default = 0) > BRIGHT_THRESH,
-
-    returns_bright = lead(Max_Light, 1, default = 0) > BRIGHT_THRESH |
-                     lead(Max_Light, 2, default = 0) > BRIGHT_THRESH |
-                     lead(Max_Light, 3, default = 0) > BRIGHT_THRESH,
-
-    # Prove abruptness
-    abrupt_intra = (Max_Light > BRIGHT_THRESH) & (Min_Light < DARK_THRESH),
-    abrupt_drop = (lag(Avg_Light, 1, default = 0) - Avg_Light) > ABRUPT_DIFF,
-    abrupt_rise = (Avg_Light - lag(Avg_Light, 1, default = 0)) > ABRUPT_DIFF,
-
-    # Classification (Using default = FALSE for logical lags at boundaries)
-    is_flicker = (Min_Light < DARK_THRESH) &
-                 was_bright &
-                 returns_bright &
-                 (abrupt_intra | abrupt_drop | abrupt_rise |
-                  lag(abrupt_intra, 1, default = FALSE) | lead(abrupt_intra, 1, default = FALSE)),
-
-    is_powered_off = (Max_Light < DARK_THRESH) & !was_bright & !returns_bright
-  ) |>
-
-  # Always ungroup after window calculations
-  ungroup() |>
-
-  # Filter out dead air
-  filter(!is_powered_off) |>
-
-  # -- FORMAT TIME STRING --
-  mutate(
-    hours = floor(Uptime_s / 3600),
-    minutes = floor((Uptime_s %% 3600) / 60),
-    seconds = Uptime_s %% 60,
-    # sprintf pads minutes and seconds with leading zeros (e.g., 01:05:09)
-    Uptime_hms = sprintf("%d:%02d:%02d", hours, minutes, seconds)
-  ) |>
-
-  # Keep relevant columns
-  select(filename, Uptime_hms, Min_Light, Max_Light, Avg_Light, Read_Count, is_flicker)
-
-# --- 4. VIEW THE EVIDENCE ---
-# Extract and print only the rows where a flicker was confirmed
-flicker_events <- df_analyzed |> filter(is_flicker == TRUE)
-flicker_events |> print(n = Inf)
+# Combined tibble retained for optional downstream use.
+flicker_events <- bind_rows(flickers_by_address)
+invisible(flicker_events)
