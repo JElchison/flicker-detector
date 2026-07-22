@@ -184,6 +184,9 @@ if command -v Rscript >/dev/null 2>&1; then
         run_generated_data_analysis
     run_check "analyze rollover boundary test data" \
         run_rollover_boundary_analysis
+    run_check "run analyzer over all data sets" \
+        find data/ -mindepth 1 -type d -exec bash -c 'pushd {}; echo === {} ===; Rscript --vanilla ~/git/flicker-detector/analyze-csv-for-flickers.R; popd;' \;
+
 else
     skip_check "generate test data"
     skip_check "analyze generated test data"
