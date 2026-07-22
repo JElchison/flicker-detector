@@ -61,7 +61,7 @@ To capture a flicker, tape the sensor flat against the light fixture's lens. Plu
 
 The system will automatically create a new file named `LOG_000.CSV` (incrementing on each reboot or every 24 hours). 
 
-When you pull the SD card and open the CSV in Excel or a data analysis tool, you will see a continuous X-axis timeline of system uptime in seconds (`Uptime_s`), accompanied by the min, max, and average brightness for that second. The `Read_Count` column tracks system health—it should show roughly the same number of sensor reads every second (i.e., Hz).
+When you pull the SD card and open the CSV in Excel or a data analysis tool, you will see a continuous X-axis timeline of system uptime in hours:minutes:seconds (`Uptime_hms`), accompanied by the min, max, and average brightness for that second. The `Read_Count` column tracks system health—it should show roughly the same number of sensor reads every second (i.e., Hz).
 
 To spot a momentary flicker, simply look for severe dips in the `Min_Light` column.
 
@@ -105,5 +105,5 @@ The output will look like this:
 2 LOG_000.CSV 1:08:00          110       818       420       8162 TRUE
 ```
 
-* **filename** & **Uptime_s:** The exact file and second the flicker occurred.
+* **filename** & **Uptime_hms:** The exact file and second the flicker occurred.
 * **Min_Light:** This number will be exceptionally low (below 150), proving the DMX fixture went dark while the `Max_Light` for that same second confirms it was otherwise supposed to be fully powered on.
