@@ -4,7 +4,7 @@
 
 This project is an Arduino-based diagnostic tool designed to definitively prove and track high-speed dropouts (flickers) in a DMX LED light fixture over long periods. 
 
-Standard visual observation or low-speed logging can miss microsecond dropouts. To solve this, the microcontroller continuously polls ultra-fast phototransistors as fast as its processor allows (thousands of times per second). Every second, it calculates the **Minimum**, **Maximum**, and **Average** light levels across that second's sampling window for each sensor address and writes both rows in a single SD write cycle. 
+Standard visual observation or low-speed logging can miss microsecond dropouts. To solve this, the microcontroller continuously polls ultra-fast phototransistors as fast as its processor allows (thousands of times per second). Every second, it calculates the **Minimum**, **Maximum**, and **Average** light levels across that second's sampling window for each sensor address, and logs both `Read_Count` (reads/sec) and `Window_Count` (completed windows/sec) in a single SD write cycle. 
 
 If the light momentarily flickers, the `Min_Light` value for that second will plummet, leaving an undeniable, timestamped record in the CSV file.
 
@@ -13,7 +13,7 @@ If the light momentarily flickers, the `Min_Light` value for that second will pl
 ### Handling LED PWM Dimming (The Tumbling Window)
 Modern DMX fixtures achieve dimming through Pulse Width Modulation (PWM)—rapidly strobing the LEDs on and off thousands of times per second. For example, a fixture with a 1.9KHz refresh rate completes a full on-off cycle every ~526 microseconds. Because this logger polls the sensor at over 8,000 Hz, it is actually fast enough to "see" the microsecond gaps where the fixture intentionally turns off to dim, which would normally trigger a false flicker alarm. 
 
-To solve this, the code uses a high-speed "Tumbling Window." It chunks the raw sensor reads into 2-millisecond buckets, averaging them together to perfectly smooth out the natural PWM duty cycle. The 1-second minimum and maximum values are then calculated using these smoothed 2ms buckets. This ensures the system ignores standard dimming dithering while still instantly catching any genuine, multi-millisecond hardware dropouts.
+To solve this, the code uses a high-speed "Tumbling Window." It chunks the raw sensor reads into 10-millisecond buckets, averaging them together to smooth out the natural PWM duty cycle. The 1-second minimum and maximum values are then calculated using these smoothed 10ms buckets. This ensures the system ignores standard dimming dithering while still instantly catching any genuine, multi-millisecond hardware dropouts.
 
 ## Hardware List
 
@@ -74,7 +74,9 @@ Each CSV row now includes an `Address` column:
 
 `Uptime_s` in the CSV is raw uptime in seconds. The R script converts this into `Uptime_hms` for human-readable reporting.
 
-The `Read_Count` column tracks system health per address - it should show roughly the same number of sensor reads every second (i.e., Hz).
+The `Read_Count` column tracks system health per address - it should show roughly the same number of sensor reads every second (reads/sec).
+
+The `Window_Count` column tracks how many tumbling windows were completed that second (windows/sec). With the default `WINDOW_SIZE_US=10000`, expect around 100 windows/sec.
 
 To spot a momentary flicker, simply look for severe dips in the `Min_Light` column.
 

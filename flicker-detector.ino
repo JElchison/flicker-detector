@@ -4,9 +4,8 @@
 
 // --- FIXTURE-SPECIFIC CONSTANTS ---
 // ADJ UBL12H PWM Refresh Rate = 1.9KHz (1 cycle = ~526 microseconds).
-// We need a window slightly larger than one cycle to absorb the dithering.
-// 2000us (2 milliseconds) safely captures ~3.8 cycles for a highly stable average.
-const unsigned long WINDOW_SIZE_US = 2000;
+// We need a window larger than one cycle to absorb the dithering.
+const unsigned long WINDOW_SIZE_US = 10000;
 
 // Pin assignments
 const int chipSelect = 4;
@@ -32,6 +31,7 @@ SensorStats sensors[SENSOR_COUNT];
 
 // Shared tumbling-window timer
 unsigned long windowStartTime_us = 0;
+unsigned long windowCountThisSecond = 0;
 
 // Non-blocking timer variables
 unsigned long lastLogTime_ms = 0;
@@ -92,7 +92,7 @@ void applyWindowAverage(SensorStats &sensor) {
   resetWindowAggregates(sensor);
 }
 
-void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &sensor) {
+void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &sensor, unsigned long windowCount) {
   int avgVal = averageOrZero(sensor.sumVal, sensor.readCount);
 
   file.print(currentTime_s);
@@ -105,7 +105,9 @@ void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &
   file.print(",");
   file.print(avgVal);
   file.print(",");
-  file.println(sensor.readCount); // Hz
+  file.print(sensor.readCount); // reads/sec
+  file.print(",");
+  file.println(windowCount); // windows/sec
 
   Serial.print("File: "); Serial.print(currentFileName);
   Serial.print(" | Addr: "); Serial.print(sensor.address);
@@ -113,7 +115,8 @@ void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &
   Serial.print("s | Min: "); Serial.print(sensor.minVal);
   Serial.print(" | Max: "); Serial.print(sensor.maxVal);
   Serial.print(" | Avg: "); Serial.print(avgVal);
-  Serial.print(" | Reads: "); Serial.println(sensor.readCount);
+  Serial.print(" | Reads/sec: "); Serial.print(sensor.readCount);
+  Serial.print(" | Windows/sec: "); Serial.println(windowCount);
 }
 
 // Helper function to trigger the error state
@@ -138,7 +141,7 @@ void createNewLogFile() {
   logFile = SD.open(currentFileName, FILE_WRITE);
   if (logFile) {
     // Just the clean CSV column headers, no extra text
-    logFile.println("Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count");
+    logFile.println("Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count,Window_Count");
     logFile.close();
     Serial.print("Created new log file: ");
     Serial.println(currentFileName);
@@ -201,6 +204,7 @@ void loop() {
     for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
       applyWindowAverage(sensors[i]);
     }
+    windowCountThisSecond++;
     windowStartTime_us = currentTime_us;
   }
 
@@ -213,7 +217,7 @@ void loop() {
     logFile = SD.open(currentFileName, FILE_WRITE);
     if (logFile) {
       for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-        writeSensorRow(logFile, currentTime_s, sensors[i]);
+        writeSensorRow(logFile, currentTime_s, sensors[i], windowCountThisSecond);
       }
       logFile.close();
     } else {
@@ -225,5 +229,6 @@ void loop() {
     for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
       resetSecondAggregates(sensors[i]);
     }
+    windowCountThisSecond = 0;
   }
 }
