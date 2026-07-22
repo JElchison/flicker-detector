@@ -1,5 +1,6 @@
 ################## flicker-detector ##################
 
+data/
 *.CSV
 *.csv
 

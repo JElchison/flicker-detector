@@ -4,17 +4,33 @@ suppressPackageStartupMessages(library(purrr))
 
 
 # --- 1. Define Thresholds ---
-DARK_THRESH   <- 150
-BRIGHT_THRESH <- 700
-ABRUPT_DIFF   <- 400
+DARK_THRESH   <- 50
+BRIGHT_THRESH <- 300
+ABRUPT_DIFF   <- 250
 
 # --- 2. Load the Data ---
 # Find all files matching the "LOG_NNN.CSV" pattern in the working directory
 file_list <- list.files(pattern = "^LOG_[0-9]{3}\\.CSV$", full.names = TRUE)
 
-# Read all matching files and automatically append a 'filename' column
-df <- map_dfr(file_list, ~read_csv(.x, show_col_types = FALSE) |>
-                mutate(filename = basename(.x)))
+# Force strict column types so empty files don't default to 'character'
+log_col_types <- cols(
+  Uptime_s = col_double(),
+  Min_Light = col_double(),
+  Max_Light = col_double(),
+  Avg_Light = col_double(),
+  Read_Count = col_double()
+)
+
+# Read files safely, discarding any that contain zero data rows
+df <- map_dfr(file_list, function(file) {
+  temp_df <- read_csv(file, col_types = log_col_types)
+
+  if (nrow(temp_df) == 0) {
+    return(NULL) # map_dfr will gracefully ignore NULL returns
+  }
+
+  temp_df %>% mutate(filename = basename(file))
+})
 
 # --- 3. Analyze and Filter ---
 df_analyzed <- df |>
