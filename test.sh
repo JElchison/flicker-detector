@@ -93,6 +93,44 @@ run_generated_data_analysis() {
     return 0
 }
 
+run_rollover_boundary_analysis() {
+    local tmpdir
+    local output_file
+
+    tmpdir="$(mktemp -d)"
+    output_file="$(mktemp)"
+
+    cat > "$tmpdir/LOG_000.CSV" <<'CSV'
+Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count
+86399,0,800,820,810,8100
+CSV
+
+    cat > "$tmpdir/LOG_001.CSV" <<'CSV'
+Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count
+86400,0,20,820,420,8100
+86401,0,800,820,810,8100
+86402,0,800,820,810,8100
+86403,0,800,820,810,8100
+CSV
+
+    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/analyze-csv-for-flickers.R'" | tee "$output_file"; then
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "24:00:00" "$output_file"; then
+        echo "Rollover boundary flicker was not detected."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    rm -f "$output_file"
+    rm -rf "$tmpdir"
+    return 0
+}
+
 # --- Shell scripts ---
 if command -v shellcheck >/dev/null 2>&1; then
     run_check "shellcheck (*.sh)" run_shellcheck
@@ -144,9 +182,12 @@ if command -v Rscript >/dev/null 2>&1; then
         bash -c "cd '$SCRIPT_DIR/test-data' && Rscript --vanilla generate-test-data.R"
     run_check "analyze generated test data" \
         run_generated_data_analysis
+    run_check "analyze rollover boundary test data" \
+        run_rollover_boundary_analysis
 else
     skip_check "generate test data"
     skip_check "analyze generated test data"
+    skip_check "analyze rollover boundary test data"
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then

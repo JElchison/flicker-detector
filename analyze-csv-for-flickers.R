@@ -66,7 +66,8 @@ analyze_one_address <- function(df, address_value) {
       is_new_session = .data$time_gap < 0 | .data$time_gap > 5,
       session_id = cumsum(.data$is_new_session)
     ) |>
-    group_by(.data$filename, .data$session_id) |>
+    # Keep lag/lead continuity across daily file rollovers inside the same session.
+    group_by(.data$session_id) |>
     mutate(
       was_bright = lag(.data$Max_Light, 1, default = 0) > BRIGHT_THRESH |
                    lag(.data$Max_Light, 2, default = 0) > BRIGHT_THRESH,
