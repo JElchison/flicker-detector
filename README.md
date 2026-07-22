@@ -1,6 +1,7 @@
 # Flicker Detector
 
 ## Overview
+
 This project is an Arduino-based diagnostic tool designed to definitively prove and track high-speed dropouts (flickers) in a DMX LED light fixture over long periods. 
 
 Standard visual observation or low-speed logging can miss microsecond dropouts. To solve this, the microcontroller continuously polls an ultra-fast phototransistor as fast as its processor allows (thousands of times per second). Every second, it calculates the **Minimum**, **Maximum**, and **Average** light levels across that second's sampling window and writes a single line of data to a MicroSD card. 
@@ -9,7 +10,13 @@ If the light momentarily flickers, the `Min_Light` value for that second will pl
 
 <img width="1231" height="927" alt="image" src="https://github.com/user-attachments/assets/217aab56-abfd-4860-a5b9-d3e3887bdaa6" />
 
+### Handling LED PWM Dimming (The Tumbling Window)
+Modern DMX fixtures achieve dimming through Pulse Width Modulation (PWM)—rapidly strobing the LEDs on and off thousands of times per second. For example, a fixture with a 1.9KHz refresh rate completes a full on-off cycle every ~526 microseconds. Because this logger polls the sensor at over 8,000 Hz, it is actually fast enough to "see" the microsecond gaps where the fixture intentionally turns off to dim, which would normally trigger a false flicker alarm. 
+
+To solve this, the code uses a high-speed "Tumbling Window." It chunks the raw sensor reads into 2-millisecond buckets, averaging them together to perfectly smooth out the natural PWM duty cycle. The 1-second minimum and maximum values are then calculated using these smoothed 2ms buckets. This ensures the system ignores standard dimming dithering while still instantly catching any genuine, multi-millisecond hardware dropouts.
+
 ## Hardware List
+
 This build uses a "stacked" approach with an Ethernet Shield to avoid needing a breadboard, making the unit compact and durable.
 
 * **Arduino Uno R3** (The main microcontroller)
@@ -49,6 +56,7 @@ This LED will blink at 1Hz when the system is logging correctly, or lock on a so
 4. Upload the project's source code (`.ino` file) to the Arduino.
 
 ## Reading the Data
+
 To capture a flicker, tape the sensor flat against the light fixture's lens. Plug the Arduino into a USB wall adapter to power it.
 
 The system will automatically create a new file named `LOG_000.CSV` (incrementing on each reboot or every 24 hours). 
@@ -56,7 +64,6 @@ The system will automatically create a new file named `LOG_000.CSV` (incrementin
 When you pull the SD card and open the CSV in Excel or a data analysis tool, you will see a continuous X-axis timeline of system uptime in seconds (`Uptime_s`), accompanied by the min, max, and average brightness for that second. The `Read_Count` column tracks system health—it should show roughly the same number of sensor reads every second (i.e., Hz).
 
 To spot a momentary flicker, simply look for severe dips in the `Min_Light` column.
-
 
 ## Data Analysis
 
@@ -91,11 +98,11 @@ The script will automatically stitch all of your daily log files together in chr
 The output will look like this:
 
 ```text
-# A tibble: 2 × 8
-  filename    session_id Uptime_s Min_Light Max_Light Avg_Light Read_Count is_flicker
-  <chr>            <int>    <dbl>     <dbl>     <dbl>     <dbl>      <dbl> <lgl>
-1 LOG_000.CSV          0      300       120       822       450       8103 TRUE
-2 LOG_000.CSV          0     4080       110       818       420       8162 TRUE
+# A tibble: 2 × 7
+  filename    Uptime_hms Min_Light Max_Light Avg_Light Read_Count is_flicker
+  <chr>       <chr>          <dbl>     <dbl>     <dbl>      <dbl> <lgl>
+1 LOG_000.CSV 0:05:00          120       822       450       8103 TRUE
+2 LOG_000.CSV 1:08:00          110       818       420       8162 TRUE
 ```
 
 * **filename** & **Uptime_s:** The exact file and second the flicker occurred.
