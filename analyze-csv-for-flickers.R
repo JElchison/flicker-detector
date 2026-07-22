@@ -2,6 +2,7 @@ suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(readr))
 suppressPackageStartupMessages(library(purrr))
 
+
 # --- 1. Define Thresholds ---
 DARK_THRESH   <- 150
 BRIGHT_THRESH <- 700
@@ -62,12 +63,19 @@ df_analyzed <- df |>
   # Filter out dead air
   filter(!is_powered_off) |>
 
+  # -- FORMAT TIME STRING --
+  mutate(
+    hours = floor(Uptime_s / 3600),
+    minutes = floor((Uptime_s %% 3600) / 60),
+    seconds = Uptime_s %% 60,
+    # sprintf pads minutes and seconds with leading zeros (e.g., 01:05:09)
+    Uptime_hms = sprintf("%d:%02d:%02d", hours, minutes, seconds)
+  ) |>
+
   # Keep relevant columns
-  select(filename, session_id, Uptime_s, Min_Light, Max_Light, Avg_Light, Read_Count, is_flicker)
+  select(filename, Uptime_hms, Min_Light, Max_Light, Avg_Light, Read_Count, is_flicker)
 
 # --- 4. VIEW THE EVIDENCE ---
 # Extract and print only the rows where a flicker was confirmed
 flicker_events <- df_analyzed |> filter(is_flicker == TRUE)
-# don't truncate
-options(width = 100)
-print(flicker_events)
+flicker_events |> print(n = Inf)
