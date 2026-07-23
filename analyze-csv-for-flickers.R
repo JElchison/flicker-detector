@@ -6,7 +6,7 @@ suppressPackageStartupMessages(library(purrr))
 # --- 1. Define Thresholds ---
 # Set just above your true "dark" floor (with fixture on) so normal PWM dips stay above it.
 # Start from the 1st percentile of Min_Light during stable operation, then add a small margin.
-DARK_THRESH   <- 100
+DARK_THRESH   <- 250
 # Set below your true "bright" ceiling so normal on-state samples exceed it.
 # Start from the 5th percentile of Max_Light during stable operation, then subtract a small margin.
 BRIGHT_THRESH <- 400
