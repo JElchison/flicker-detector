@@ -3,20 +3,25 @@ suppressPackageStartupMessages(library(readr))
 suppressPackageStartupMessages(library(purrr))
 
 
-# --- 1. Define Thresholds ---
-# Set just above your true "dark" floor (with fixture on) so normal PWM dips stay above it.
-# Start from the 1st percentile of Min_Light during stable operation, then add a small margin.
-DARK_THRESH   <- 250
-# Set below your true "bright" ceiling so normal on-state samples exceed it.
-# Start from the 5th percentile of Max_Light during stable operation, then subtract a small margin.
-BRIGHT_THRESH <- 400
-# Minimum one-second Avg_Light jump/drop required to count as abrupt.
-# Increase to reduce false positives from noise; decrease to catch subtler flickers.
-ABRUPT_DIFF   <- 250
+# --- 1. Define Detection Sensitivity ---
+# Within-second dip depth is measured as: Avg_Light - Min_Light.
+# The analyzer auto-calibrates a per-address threshold using this quantile.
+AUTO_DIP_QUANTILE <- 0.99
+# If there are too few rows or invalid data, use this fallback threshold.
+FALLBACK_DIP_FROM_AVG_THRESH <- 100
 
 # --- 2. Load and Normalize Data ---
 required_cols <- c("Uptime_s", "Min_Light", "Max_Light", "Avg_Light", "Read_Count")
-result_cols <- c("filename", "Uptime_hms", "Min_Light", "Max_Light", "Avg_Light", "Read_Count", "is_flicker")
+result_cols <- c("filename", "Uptime_hms", "Min_Light", "Max_Light", "Avg_Light", "Read_Count", "dip_from_avg", "dip_threshold", "is_flicker")
+
+calibrate_dip_threshold <- function(dips) {
+  valid <- dips[is.finite(dips)]
+  if (length(valid) < 20) {
+    return(FALLBACK_DIP_FROM_AVG_THRESH)
+  }
+
+  as.double(quantile(valid, probs = AUTO_DIP_QUANTILE, names = FALSE, type = 8))
+}
 
 load_one_log <- function(file) {
   temp_df <- read_csv(file, show_col_types = FALSE, progress = FALSE)
@@ -64,34 +69,23 @@ load_logs <- function() {
 
 # --- 3. Analyze One Address ---
 analyze_one_address <- function(df, address_value) {
-  df |>
+  prepared <- df |>
     filter(.data$Address == address_value) |>
     arrange(.data$filename, .data$Uptime_s) |>
     mutate(
       time_gap = .data$Uptime_s - lag(.data$Uptime_s, default = first(.data$Uptime_s)),
       is_new_session = .data$time_gap < 0 | .data$time_gap > 5,
-      session_id = cumsum(.data$is_new_session)
-    ) |>
-    # Keep lag/lead continuity across daily file rollovers inside the same session.
-    group_by(.data$session_id) |>
+      session_id = cumsum(.data$is_new_session),
+      dip_from_avg = .data$Avg_Light - .data$Min_Light
+    )
+
+  dip_threshold <- calibrate_dip_threshold(prepared$dip_from_avg)
+
+  prepared |>
     mutate(
-      was_bright = lag(.data$Max_Light, 1, default = 0) > BRIGHT_THRESH |
-                   lag(.data$Max_Light, 2, default = 0) > BRIGHT_THRESH,
-      returns_bright = lead(.data$Max_Light, 1, default = 0) > BRIGHT_THRESH |
-                       lead(.data$Max_Light, 2, default = 0) > BRIGHT_THRESH |
-                       lead(.data$Max_Light, 3, default = 0) > BRIGHT_THRESH,
-      abrupt_intra = (.data$Max_Light > BRIGHT_THRESH) & (.data$Min_Light < DARK_THRESH),
-      abrupt_drop = (lag(.data$Avg_Light, 1, default = 0) - .data$Avg_Light) > ABRUPT_DIFF,
-      abrupt_rise = (.data$Avg_Light - lag(.data$Avg_Light, 1, default = 0)) > ABRUPT_DIFF,
-      is_flicker = (.data$Min_Light < DARK_THRESH) &
-                   .data$was_bright &
-                   .data$returns_bright &
-                   (.data$abrupt_intra | .data$abrupt_drop | .data$abrupt_rise |
-                    lag(.data$abrupt_intra, 1, default = FALSE) | lead(.data$abrupt_intra, 1, default = FALSE)),
-      is_powered_off = (.data$Max_Light < DARK_THRESH) & !.data$was_bright & !.data$returns_bright
+      dip_threshold = dip_threshold,
+      is_flicker = .data$dip_from_avg > .data$dip_threshold
     ) |>
-    ungroup() |>
-    filter(!.data$is_powered_off) |>
     mutate(
       hours = floor(.data$Uptime_s / 3600),
       minutes = floor((.data$Uptime_s %% 3600) / 60),
@@ -103,6 +97,9 @@ analyze_one_address <- function(df, address_value) {
 
 print_flicker_table <- function(flicker_df, address_value) {
   cat("\n=== Address", address_value, "===\n")
+  if (nrow(flicker_df) > 0) {
+    cat("Dip threshold (auto):", round(first(flicker_df$dip_threshold), 2), "\n")
+  }
   if (nrow(flicker_df) == 0) {
     cat("No flickers detected.\n")
     return(invisible(NULL))

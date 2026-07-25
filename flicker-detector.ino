@@ -5,7 +5,7 @@
 // --- FIXTURE-SPECIFIC CONSTANTS ---
 // ADJ UBL12H PWM Refresh Rate = 1.9KHz (1 cycle = ~526 microseconds).
 // We need a window larger than one cycle to absorb the dithering.
-const unsigned long WINDOW_SIZE_US = 10000;
+const unsigned long WINDOW_SIZE_US = 50000;
 
 // Pin assignments
 const int chipSelect = 4;
