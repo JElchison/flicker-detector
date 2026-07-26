@@ -2,133 +2,117 @@
 #include <SD.h>
 
 
-// --- FIXTURE-SPECIFIC CONSTANTS ---
-// ADJ UBL12H PWM Refresh Rate = 1.9KHz (1 cycle = ~526 microseconds).
-// We need a window larger than one cycle to absorb the dithering.
-const unsigned long WINDOW_SIZE_US = 50000;
+// --- Detector tuning --------------------------------------------------------
+const uint16_t SAMPLE_RATE_HZ = 4000;
+const uint16_t PWM_REFRESH_HZ = 1920;  // cut sheet says 1.9 kHz
+// UBL12H fixtures dim with 1920 Hz PWM. A fast EMA around 80 Hz reacts quickly
+// enough to catch visible flicker while still rejecting the carrier ripple.
+const uint8_t FAST_N = 3;
+// Slow EMA baseline: roughly a 1-2 second trailing average that adapts to fades
+// and dimming without chasing the short dips we want to detect.
+const uint8_t SLOW_N = 12;
+// Dip/recovery thresholds are ratio-based so the detector follows the baseline
+// instead of depending on an absolute light level.
+const uint8_t THRESHOLD_DIP_PCT = 85;
+const uint8_t THRESHOLD_RECOVER_PCT = 95;
+// Require multiple consecutive low samples so a PWM valley does not count as a
+// real flicker.
+const uint8_t MIN_CONSECUTIVE_LOW_SAMPLES = (SAMPLE_RATE_HZ / PWM_REFRESH_HZ) + 1;
+// If the light stays low for a full second, classify it as a blackout/fade and
+// let the baseline continue adapting.
+const uint16_t DIP_TIMEOUT_MS = 1000;
+const uint16_t MAX_DIP_SAMPLES = (SAMPLE_RATE_HZ * DIP_TIMEOUT_MS) / 1000UL;
 
-// Pin assignments
+// --- Hardware pins ----------------------------------------------------------
 const int chipSelect = 4;
-const int statusLed = 7; // External LED for heartbeat
-
+const int statusLed = 7;
 const uint8_t SENSOR_COUNT = 2;
 const uint8_t sensorPins[SENSOR_COUNT] = {A0, A1};
 
+const unsigned long LOG_INTERVAL_MS = 1000UL;
+const unsigned long ONE_DAY_MS = 24UL * 60UL * 60UL * 1000UL;
+const uint16_t TIMER1_TARGET_HZ = SAMPLE_RATE_HZ;
+const uint8_t TIMER1_PRESCALER = 8;
+// On an Uno, F_CPU is 16 MHz. With an 8x prescaler, Timer1 ticks at 2 MHz,
+// so 2,000,000 / 4000 - 1 = 499.
+const uint16_t TIMER1_TOP = (F_CPU / (TIMER1_PRESCALER * TIMER1_TARGET_HZ)) - 1;
+
 File logFile;
-
-struct SensorStats {
-  uint8_t address;
-  uint8_t pin;
-  int minVal;
-  int maxVal;
-  unsigned long sumVal;
-  unsigned long readCount;
-  unsigned long windowSum;
-  unsigned int windowReads;
-};
-
-SensorStats sensors[SENSOR_COUNT];
-
-// Shared tumbling-window timer
-unsigned long windowStartTime_us = 0;
-unsigned long windowCountThisSecond = 0;
-
-// Non-blocking timer variables
+char currentFileName[13];
+int fileIndex = 0;
 unsigned long lastLogTime_ms = 0;
 unsigned long lastBlinkTime_ms = 0;
+unsigned long lastRolloverTime_ms = 0;
 bool ledState = LOW;
 
-// Daily Rollover Variables
-const unsigned long ONE_DAY_MS = (unsigned long) (24UL * 60UL * 60UL * 1000UL); // 24 hours in milliseconds
-unsigned long lastRolloverTime_ms = 0;
-char currentFileName[13]; // Buffer to hold "LOG_XXX.CSV"
-int fileIndex = 0;
+enum DetectionState : uint8_t {
+  STATE_ARMED = 0,
+  STATE_IN_DIP = 1,
+};
 
-void resetSecondAggregates(SensorStats &sensor) {
-  sensor.minVal = 1023;
-  sensor.maxVal = 0;
-  sensor.sumVal = 0;
-  sensor.readCount = 0;
-}
+struct SensorRuntime {
+  uint8_t address;
+  uint8_t pin;
+  volatile int32_t fastAccumulator;
+  volatile int32_t slowAccumulator;
+  volatile uint16_t baselineLight;
+  volatile uint16_t readCount;
+  volatile uint16_t flickerCount;
+  volatile uint8_t minRatio_pct;
+  volatile uint8_t state;
+  volatile uint8_t lowCount;
+  volatile uint16_t dipSampleCount;
+  volatile uint8_t currentDipMin_pct;
+};
 
-void resetWindowAggregates(SensorStats &sensor) {
-  sensor.windowSum = 0;
-  sensor.windowReads = 0;
-}
+struct SensorSnapshot {
+  uint8_t address;
+  uint16_t baselineLight;
+  uint16_t readCount;
+  uint16_t flickerCount;
+  uint8_t minRatio_pct;
+};
 
-void initSensor(SensorStats &sensor, uint8_t address, uint8_t pin) {
-  sensor.address = address;
-  sensor.pin = pin;
-  resetSecondAggregates(sensor);
-  resetWindowAggregates(sensor);
-}
+SensorRuntime sensors[SENSOR_COUNT];
+SensorSnapshot snapshots[SENSOR_COUNT];
 
-void initSensors() {
-  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-    initSensor(sensors[i], i, sensorPins[i]);
-  }
-}
-
-int averageOrZero(unsigned long sum, unsigned long count) {
-  return (count == 0) ? 0 : (sum / count);
-}
-
-void sampleSensor(SensorStats &sensor) {
-  int currentLight = analogRead(sensor.pin);
-  sensor.sumVal += currentLight;
-  sensor.readCount++;
-  sensor.windowSum += currentLight;
-  sensor.windowReads++;
-}
-
-void applyWindowAverage(SensorStats &sensor) {
-  if (sensor.windowReads == 0) {
-    return;
-  }
-
-  int windowAvg = sensor.windowSum / sensor.windowReads;
-  if (windowAvg < sensor.minVal) { sensor.minVal = windowAvg; }
-  if (windowAvg > sensor.maxVal) { sensor.maxVal = windowAvg; }
-  resetWindowAggregates(sensor);
-}
-
-void writeSensorRow(File &file, unsigned long currentTime_s, const SensorStats &sensor, unsigned long windowCount) {
-  int avgVal = averageOrZero(sensor.sumVal, sensor.readCount);
-
-  file.print(currentTime_s);
-  file.print(",");
-  file.print(sensor.address);
-  file.print(",");
-  file.print(sensor.minVal);
-  file.print(",");
-  file.print(sensor.maxVal);
-  file.print(",");
-  file.print(avgVal);
-  file.print(",");
-  file.print(sensor.readCount); // reads/sec
-  file.print(",");
-  file.println(windowCount); // windows/sec
-
-  Serial.print("File: "); Serial.print(currentFileName);
-  Serial.print(" | Addr: "); Serial.print(sensor.address);
-  Serial.print(" | Uptime: "); Serial.print(currentTime_s);
-  Serial.print("s | Min: "); Serial.print(sensor.minVal);
-  Serial.print(" | Max: "); Serial.print(sensor.maxVal);
-  Serial.print(" | Avg: "); Serial.print(avgVal);
-  Serial.print(" | Reads/sec: "); Serial.print(sensor.readCount);
-  Serial.print(" | Windows/sec: "); Serial.println(windowCount);
-}
-
-// Helper function to trigger the error state
 void triggerError() {
   Serial.println("SYSTEM ERROR. Halting.");
-  digitalWrite(statusLed, HIGH); // Solid ON for error
-  while (1) {
+  digitalWrite(statusLed, HIGH);
+  while (true) {
     delay(10);
   }
 }
 
-// Function to generate the next available filename and write the header
+void resetSensorSecondCounters(SensorRuntime &sensor) {
+  sensor.readCount = 0;
+  sensor.flickerCount = 0;
+  sensor.minRatio_pct = 100;
+}
+
+void initializeSensor(SensorRuntime &sensor, uint8_t address, uint8_t pin) {
+  sensor.address = address;
+  sensor.pin = pin;
+
+  uint16_t initialLight = analogRead(pin);
+  sensor.fastAccumulator = (int32_t)initialLight << FAST_N;
+  sensor.slowAccumulator = (int32_t)initialLight << SLOW_N;
+  sensor.baselineLight = initialLight;
+  sensor.readCount = 0;
+  sensor.flickerCount = 0;
+  sensor.minRatio_pct = 100;
+  sensor.state = STATE_ARMED;
+  sensor.lowCount = 0;
+  sensor.dipSampleCount = 0;
+  sensor.currentDipMin_pct = 100;
+}
+
+void initializeSensors() {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    initializeSensor(sensors[i], i, sensorPins[i]);
+  }
+}
+
 void createNewLogFile() {
   while (true) {
     sprintf(currentFileName, "LOG_%03d.CSV", fileIndex);
@@ -139,17 +123,144 @@ void createNewLogFile() {
   }
 
   logFile = SD.open(currentFileName, FILE_WRITE);
-  if (logFile) {
-    // Just the clean CSV column headers, no extra text
-    logFile.println("Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count,Window_Count");
-    logFile.close();
-    Serial.print("Created new log file: ");
-    Serial.println(currentFileName);
-  } else {
+  if (!logFile) {
     Serial.print("Error creating ");
     Serial.println(currentFileName);
     triggerError();
   }
+
+  logFile.println("Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct");
+  logFile.close();
+  Serial.print("Created new log file: ");
+  Serial.println(currentFileName);
+}
+
+void configureTimer1() {
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+  OCR1A = TIMER1_TOP;
+  TCCR1B |= _BV(WGM12);
+  TCCR1B |= _BV(CS11);
+  TIMSK1 |= _BV(OCIE1A);
+  interrupts();
+}
+
+void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
+  int32_t fastDelta = (int32_t)currentLight - (sensor.fastAccumulator >> FAST_N);
+  int32_t slowDelta = (int32_t)currentLight - (sensor.slowAccumulator >> SLOW_N);
+
+  sensor.fastAccumulator += fastDelta;
+  sensor.slowAccumulator += slowDelta;
+
+  uint16_t fastLight = (uint16_t)(sensor.fastAccumulator >> FAST_N);
+  uint16_t slowLight = (uint16_t)(sensor.slowAccumulator >> SLOW_N);
+
+  sensor.baselineLight = slowLight;
+  sensor.readCount++;
+
+  uint8_t ratio_pct = 100;
+  if (slowLight > 10) {
+    ratio_pct = (uint8_t)((fastLight * 100UL) / slowLight);
+  }
+  if (ratio_pct > 100) {
+    ratio_pct = 100;
+  }
+
+  if (ratio_pct < sensor.minRatio_pct) {
+    sensor.minRatio_pct = ratio_pct;
+  }
+
+  if (sensor.state == STATE_ARMED) {
+    if (ratio_pct <= THRESHOLD_DIP_PCT) {
+      sensor.lowCount++;
+      if (sensor.lowCount >= MIN_CONSECUTIVE_LOW_SAMPLES) {
+        sensor.state = STATE_IN_DIP;
+        sensor.dipSampleCount = sensor.lowCount;
+        sensor.currentDipMin_pct = ratio_pct;
+      }
+    } else {
+      sensor.lowCount = 0;
+    }
+    return;
+  }
+
+  sensor.dipSampleCount++;
+  if (ratio_pct < sensor.currentDipMin_pct) {
+    sensor.currentDipMin_pct = ratio_pct;
+  }
+
+  if (ratio_pct >= THRESHOLD_RECOVER_PCT) {
+    if (sensor.dipSampleCount < MAX_DIP_SAMPLES) {
+      sensor.flickerCount++;
+      if (sensor.currentDipMin_pct < sensor.minRatio_pct) {
+        sensor.minRatio_pct = sensor.currentDipMin_pct;
+      }
+    }
+
+    sensor.state = STATE_ARMED;
+    sensor.lowCount = 0;
+    sensor.dipSampleCount = 0;
+    sensor.currentDipMin_pct = 100;
+    return;
+  }
+
+  if (sensor.dipSampleCount >= MAX_DIP_SAMPLES) {
+    sensor.state = STATE_ARMED;
+    sensor.lowCount = 0;
+    sensor.dipSampleCount = 0;
+    sensor.currentDipMin_pct = 100;
+  }
+}
+
+ISR(TIMER1_COMPA_vect) {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    uint16_t currentLight = analogRead(sensors[i].pin);
+    updateSensorState(sensors[i], currentLight);
+  }
+}
+
+void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long uptimeSeconds) {
+  file.print(uptimeSeconds);
+  file.print(",");
+  file.print(snapshot.address);
+  file.print(",");
+  file.print(snapshot.baselineLight);
+  file.print(",");
+  file.print(snapshot.readCount);
+  file.print(",");
+  file.print(snapshot.flickerCount);
+  file.print(",");
+  file.println(snapshot.minRatio_pct);
+
+  Serial.print("File: ");
+  Serial.print(currentFileName);
+  Serial.print(" | Addr: ");
+  Serial.print(snapshot.address);
+  Serial.print(" | Uptime: ");
+  Serial.print(uptimeSeconds);
+  Serial.print("s | Baseline: ");
+  Serial.print(snapshot.baselineLight);
+  Serial.print(" | Reads/sec: ");
+  Serial.print(snapshot.readCount);
+  Serial.print(" | Flickers/sec: ");
+  Serial.print(snapshot.flickerCount);
+  Serial.print(" | Min ratio: ");
+  Serial.println(snapshot.minRatio_pct);
+}
+
+void copyAndResetSecondCounters() {
+  noInterrupts();
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    snapshots[i].address = sensors[i].address;
+    snapshots[i].baselineLight = sensors[i].baselineLight;
+    snapshots[i].readCount = sensors[i].readCount;
+    snapshots[i].flickerCount = sensors[i].flickerCount;
+    snapshots[i].minRatio_pct = sensors[i].minRatio_pct;
+    resetSensorSecondCounters(sensors[i]);
+  }
+  interrupts();
 }
 
 void setup() {
@@ -168,16 +279,19 @@ void setup() {
   }
   Serial.println("SD card initialized.");
 
-  initSensors();
+  initializeSensors();
   createNewLogFile();
 
-  // Initialize the microsecond timer
-  windowStartTime_us = micros();
+  lastLogTime_ms = millis();
+  lastBlinkTime_ms = lastLogTime_ms;
+  lastRolloverTime_ms = lastLogTime_ms;
+
+  configureTimer1();
+  Serial.println("System armed. Timer1 ISR sampling at 4000 Hz.");
 }
 
 void loop() {
   unsigned long currentTime_ms = millis();
-  unsigned long currentTime_us = micros();
 
   // 1. NON-BLOCKING LED HEARTBEAT (1 Hz)
   if (currentTime_ms - lastBlinkTime_ms >= 500) {
@@ -193,42 +307,21 @@ void loop() {
     createNewLogFile();
   }
 
-  // 3. READ BOTH LIGHT SENSORS
-  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-    sampleSensor(sensors[i]);
-  }
+  if (currentTime_ms - lastLogTime_ms >= LOG_INTERVAL_MS) {
+    lastLogTime_ms += LOG_INTERVAL_MS;
 
-  // 4. EVALUATE TUMBLING WINDOW
-  // If the micro-bucket has reached its time limit
-  if (currentTime_us - windowStartTime_us >= WINDOW_SIZE_US) {
-    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-      applyWindowAverage(sensors[i]);
-    }
-    windowCountThisSecond++;
-    windowStartTime_us = currentTime_us;
-  }
+    copyAndResetSecondCounters();
 
-  // 5. LOG DATA EVERY 1 SECOND (single SD open/close cycle)
-  if (currentTime_ms - lastLogTime_ms >= 1000) {
-    lastLogTime_ms = currentTime_ms;
-
-    unsigned long currentTime_s = currentTime_ms / 1000;
-
+    unsigned long uptimeSeconds = currentTime_ms / 1000UL;
     logFile = SD.open(currentFileName, FILE_WRITE);
-    if (logFile) {
-      for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-        writeSensorRow(logFile, currentTime_s, sensors[i], windowCountThisSecond);
-      }
-      logFile.close();
-    } else {
+    if (!logFile) {
       Serial.println("Error writing to file during loop");
       triggerError();
     }
 
-    // Reset per-sensor 1-second aggregates
     for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-      resetSecondAggregates(sensors[i]);
+      writeSensorRow(logFile, snapshots[i], uptimeSeconds);
     }
-    windowCountThisSecond = 0;
+    logFile.close();
   }
 }
