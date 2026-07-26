@@ -16,7 +16,7 @@ const uint8_t SLOW_N = 12;
 const uint8_t THRESHOLD_DIP_PCT = 83;  // vs. MIN_CONSECUTIVE_LOW_SAMPLES
 const uint8_t THRESHOLD_DEEP_DIP_PCT = 79;  // vs. MIN_CONSECUTIVE_DEEP_LOW_SAMPLES
 const uint8_t THRESHOLD_RECOVER_PCT = 96;
-const uint8_t MIN_COUNTED_DIP_PCT = 78;  // flicker isn't counted unless it gets this low
+const uint8_t MIN_COUNTED_DIP_PCT = 75;  // flicker isn't counted unless it gets this low
 // Require multiple consecutive low samples so a PWM valley does not count as a
 // real flicker.
 const uint8_t PWM_SAMPLES_PER_CYCLE =
@@ -92,6 +92,7 @@ struct SensorRuntime {
   volatile uint16_t readCount;
   volatile uint16_t flickerCount;
   volatile uint8_t minRatio_pct;
+  volatile uint16_t dipSampleCountPerSecond;
   volatile uint8_t state;
   volatile uint8_t lowCount;
   volatile uint8_t deepLowCount;
@@ -106,6 +107,7 @@ struct SensorSnapshot {
   uint16_t readCount;
   uint16_t flickerCount;
   uint8_t minRatio_pct;
+  uint16_t dipSampleCountPerSecond;
 };
 
 SensorRuntime sensors[SENSOR_COUNT];
@@ -123,6 +125,7 @@ void resetSensorSecondCounters(SensorRuntime &sensor) {
   sensor.readCount = 0;
   sensor.flickerCount = 0;
   sensor.minRatio_pct = 100;
+  sensor.dipSampleCountPerSecond = 0;
 }
 
 void configureAdcForIsrSampling() {
@@ -144,6 +147,7 @@ void initializeSensor(SensorRuntime &sensor, uint8_t address, uint8_t pin) {
   sensor.readCount = 0;
   sensor.flickerCount = 0;
   sensor.minRatio_pct = 100;
+  sensor.dipSampleCountPerSecond = 0;
   sensor.state = STATE_ARMED;
   sensor.lowCount = 0;
   sensor.deepLowCount = 0;
@@ -174,7 +178,7 @@ void createNewLogFile() {
     triggerError();
   }
 
-  logFile.println("Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct");
+  logFile.println("Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count");
   logFile.close();
   Serial.print("Created new log file: ");
   Serial.println(currentFileName);
@@ -234,6 +238,11 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
 
   if (ratio_pct < sensor.minRatio_pct) {
     sensor.minRatio_pct = ratio_pct;
+  }
+
+  // Count how many ISR samples per second are under the dip threshold.
+  if (ratio_pct <= THRESHOLD_DIP_PCT) {
+    sensor.dipSampleCountPerSecond++;
   }
 
   if (sensor.state == STATE_ARMED) {
@@ -312,7 +321,9 @@ void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long up
   file.print(",");
   file.print(snapshot.flickerCount);
   file.print(",");
-  file.println(snapshot.minRatio_pct);
+  file.print(snapshot.minRatio_pct);
+  file.print(",");
+  file.println(snapshot.dipSampleCountPerSecond);
 
   Serial.print("File: ");
   Serial.print(currentFileName);
@@ -327,7 +338,9 @@ void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long up
   Serial.print(" | Flickers/sec: ");
   Serial.print(snapshot.flickerCount);
   Serial.print(" | Min ratio: ");
-  Serial.println(snapshot.minRatio_pct);
+  Serial.print(snapshot.minRatio_pct);
+  Serial.print(" | Dip samples/sec: ");
+  Serial.println(snapshot.dipSampleCountPerSecond);
 }
 
 void copyAndResetSecondCounters() {
@@ -338,6 +351,7 @@ void copyAndResetSecondCounters() {
     snapshots[i].readCount = sensors[i].readCount;
     snapshots[i].flickerCount = sensors[i].flickerCount;
     snapshots[i].minRatio_pct = sensors[i].minRatio_pct;
+    snapshots[i].dipSampleCountPerSecond = sensors[i].dipSampleCountPerSecond;
     resetSensorSecondCounters(sensors[i]);
   }
   interrupts();

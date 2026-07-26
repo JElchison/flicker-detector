@@ -23,7 +23,8 @@ result_cols <- c(
   "Baseline_Light",
   "Read_Count",
   "Flicker_Count",
-  "Min_Ratio_Pct"
+  "Min_Ratio_Pct",
+  "Dip_Sample_Count"
 )
 
 load_one_log <- function(file) {
@@ -46,7 +47,12 @@ load_one_log <- function(file) {
       Baseline_Light = as.double(.data$Baseline_Light),
       Read_Count = as.double(.data$Read_Count),
       Flicker_Count = as.integer(.data$Flicker_Count),
-      Min_Ratio_Pct = as.integer(.data$Min_Ratio_Pct)
+      Min_Ratio_Pct = as.integer(.data$Min_Ratio_Pct),
+      Dip_Sample_Count = if ("Dip_Sample_Count" %in% names(temp_df)) {
+        as.integer(.data$Dip_Sample_Count)
+      } else {
+        NA_integer_
+      }
     )
 }
 
@@ -79,7 +85,10 @@ print_events <- function(events_df, address_value) {
     return(invisible(NULL))
   }
 
-  print(events_df, n = Inf)
+  old_width <- getOption("width")
+  on.exit(options(width = old_width), add = TRUE)
+  options(width = 200)
+  print(as.data.frame(events_df), row.names = FALSE)
   invisible(NULL)
 }
 

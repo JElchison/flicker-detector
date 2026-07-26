@@ -99,7 +99,9 @@ run_sim_constant_sync_check() {
         FAST_N
         SLOW_N
         THRESHOLD_DIP_PCT
+        THRESHOLD_DEEP_DIP_PCT
         THRESHOLD_RECOVER_PCT
+        MIN_COUNTED_DIP_PCT
         DIP_TIMEOUT_MS
     )
     local name
@@ -214,16 +216,16 @@ run_rollover_boundary_analysis() {
     output_file="$(mktemp)"
 
     cat > "$tmpdir/LOG_000.CSV" <<'CSV'
-Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct
-86399,0,810,3200,0,100
+Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count
+86399,0,810,3200,0,100,0
 CSV
 
     cat > "$tmpdir/LOG_001.CSV" <<'CSV'
-Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct
-86400,0,420,3200,1,58
-86401,0,810,3200,0,100
-86402,0,810,3200,0,100
-86403,0,810,3200,0,100
+Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count
+86400,0,420,3200,1,58,180
+86401,0,810,3200,0,100,0
+86402,0,810,3200,0,100,0
+86403,0,810,3200,0,100,0
 CSV
 
     if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/summarize-firmware-flicker-logs.R'" | tee "$output_file"; then

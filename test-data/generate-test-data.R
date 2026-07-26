@@ -13,7 +13,8 @@ make_address_stream <- function(address_value, seconds_total) {
     Baseline_Light = sample(790:810, seconds_total, replace = TRUE),
     Read_Count = sample(3190:3210, seconds_total, replace = TRUE),
     Flicker_Count = 0L,
-    Min_Ratio_Pct = sample(96:100, seconds_total, replace = TRUE)
+    Min_Ratio_Pct = sample(96:100, seconds_total, replace = TRUE),
+    Dip_Sample_Count = sample(0:5, seconds_total, replace = TRUE)
   )
 }
 
@@ -23,6 +24,7 @@ inject_flickers <- function(df, flicker_seconds, baseline_values, flicker_counts
     df$Baseline_Light[df$Uptime_s == second_idx] <- baseline_values[[i]]
     df$Flicker_Count[df$Uptime_s == second_idx] <- flicker_counts[[i]]
     df$Min_Ratio_Pct[df$Uptime_s == second_idx] <- min_ratios[[i]]
+    df$Dip_Sample_Count[df$Uptime_s == second_idx] <- sample(80:240, 1)
   }
   df
 }
