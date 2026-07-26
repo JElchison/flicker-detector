@@ -32,10 +32,26 @@ const uint8_t sensorPins[SENSOR_COUNT] = {A0, A1};
 const unsigned long LOG_INTERVAL_MS = 1000UL;
 const unsigned long ONE_DAY_MS = 24UL * 60UL * 60UL * 1000UL;
 const uint16_t TIMER1_TARGET_HZ = SAMPLE_RATE_HZ;
+// Timer1 uses CS12:CS11:CS10 = 0:1:0 in configureTimer1() (CS11 set only),
+// which is the datasheet's /8 prescaler mode. That makes a 16 MHz Uno tick
+// Timer1 at 2 MHz, so OCR1A can be set to 499 for a 4000 Hz ISR cadence.
 const uint8_t TIMER1_PRESCALER = 8;
 // On an Uno, F_CPU is 16 MHz. With an 8x prescaler, Timer1 ticks at 2 MHz,
 // so 2,000,000 / 4000 - 1 = 499.
 const uint16_t TIMER1_TOP = (F_CPU / (TIMER1_PRESCALER * TIMER1_TARGET_HZ)) - 1;
+
+static_assert(TIMER1_PRESCALER == 8,
+              "TIMER1_PRESCALER must match CS12:CS11:CS10 = 0:1:0 (/8 mode).");
+static_assert((F_CPU % (TIMER1_PRESCALER * TIMER1_TARGET_HZ)) == 0,
+              "Timer1 divisor must divide F_CPU exactly for stable ISR cadence.");
+static_assert(TIMER1_TOP == 499,
+              "Expected Uno Timer1 TOP is 499 for 4000 Hz ISR at 16 MHz with /8 prescaler.");
+static_assert(TIMER1_TOP <= 0xFFFF,
+              "TIMER1_TOP must fit in the 16-bit OCR1A register.");
+static_assert(THRESHOLD_DIP_PCT < THRESHOLD_RECOVER_PCT,
+              "Dip threshold must be below recovery threshold.");
+static_assert(MIN_CONSECUTIVE_LOW_SAMPLES >= 2,
+              "Minimum low samples must reject a single PWM valley.");
 
 File logFile;
 char currentFileName[13];
@@ -145,6 +161,24 @@ void configureTimer1() {
   TCCR1B |= _BV(CS11);
   TIMSK1 |= _BV(OCIE1A);
   interrupts();
+}
+
+void validateTimer1ConfigOrHalt() {
+  // Ensure register-level timer setup matches the constants above.
+  if (OCR1A != TIMER1_TOP) {
+    Serial.println(F("Timer1 config mismatch: OCR1A"));
+    triggerError();
+  }
+
+  if ((TCCR1B & (_BV(CS12) | _BV(CS11) | _BV(CS10))) != _BV(CS11)) {
+    Serial.println(F("Timer1 config mismatch: prescaler bits"));
+    triggerError();
+  }
+
+  if ((TCCR1B & _BV(WGM12)) == 0) {
+    Serial.println(F("Timer1 config mismatch: CTC mode"));
+    triggerError();
+  }
 }
 
 void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
@@ -287,6 +321,7 @@ void setup() {
   lastRolloverTime_ms = lastLogTime_ms;
 
   configureTimer1();
+  validateTimer1ConfigOrHalt();
   Serial.println("System armed. Timer1 ISR sampling at 4000 Hz.");
 }
 
@@ -307,11 +342,14 @@ void loop() {
     createNewLogFile();
   }
 
+  // 3. ONE-SECOND LOGGING INTERVAL (WITH CATCH-UP AFTER STALLS)
   if (currentTime_ms - lastLogTime_ms >= LOG_INTERVAL_MS) {
     lastLogTime_ms += LOG_INTERVAL_MS;
 
+    // 4. SNAPSHOT ISR COUNTERS FOR A CONSISTENT PER-SECOND ROW
     copyAndResetSecondCounters();
 
+    // 5. APPEND ONE ROW PER SENSOR TO THE ACTIVE LOG FILE
     unsigned long uptimeSeconds = currentTime_ms / 1000UL;
     logFile = SD.open(currentFileName, FILE_WRITE);
     if (!logFile) {
