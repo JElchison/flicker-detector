@@ -7,13 +7,17 @@
 // It lets us validate the same state machine without needing the Arduino or
 // a real light fixture.
 
-#define SAMPLE_RATE_HZ 4000u
+#define SAMPLE_RATE_HZ 3200u
 #define PWM_REFRESH_HZ 1920u
 #define FAST_N 3u
 #define SLOW_N 12u
-#define THRESHOLD_DIP_PCT 85u
-#define THRESHOLD_RECOVER_PCT 95u
-#define MIN_CONSECUTIVE_LOW_SAMPLES ((SAMPLE_RATE_HZ / PWM_REFRESH_HZ) + 1u)
+#define THRESHOLD_DIP_PCT 83u
+#define THRESHOLD_DEEP_DIP_PCT 79u
+#define THRESHOLD_RECOVER_PCT 96u
+#define MIN_COUNTED_DIP_PCT 78u
+#define PWM_SAMPLES_PER_CYCLE (((SAMPLE_RATE_HZ + PWM_REFRESH_HZ - 1u) / PWM_REFRESH_HZ))
+#define MIN_CONSECUTIVE_LOW_SAMPLES (PWM_SAMPLES_PER_CYCLE + 1u)
+#define MIN_CONSECUTIVE_DEEP_LOW_SAMPLES (PWM_SAMPLES_PER_CYCLE)
 #define DIP_TIMEOUT_MS 1000u
 #define MAX_DIP_SAMPLES ((SAMPLE_RATE_HZ * DIP_TIMEOUT_MS) / 1000u)
 #define PWM_PHASE_MAX SAMPLE_RATE_HZ
@@ -38,8 +42,10 @@ typedef struct {
     uint8_t minRatioPct;
     DetectionState state;
     uint8_t lowCount;
+    uint8_t deepLowCount;
     uint16_t dipSampleCount;
     uint8_t currentDipMinPct;
+    uint32_t sampleCountSinceBoot;
 } DetectorState;
 
 typedef struct {
@@ -93,8 +99,10 @@ static void initialize_detector(DetectorState *state, uint16_t initialLight) {
     state->minRatioPct = 100;
     state->state = STATE_ARMED;
     state->lowCount = 0;
+    state->deepLowCount = 0;
     state->dipSampleCount = 0;
     state->currentDipMinPct = 100;
+    state->sampleCountSinceBoot = 0u;
 }
 
 static void update_detector(DetectorState *state, uint16_t currentLight) {
@@ -109,6 +117,7 @@ static void update_detector(DetectorState *state, uint16_t currentLight) {
 
     state->baselineLight = slowLight;
     state->readCount++;
+    state->sampleCountSinceBoot++;
 
     uint8_t ratioPct = 100;
     if (slowLight > 10u) {
@@ -125,13 +134,24 @@ static void update_detector(DetectorState *state, uint16_t currentLight) {
     if (state->state == STATE_ARMED) {
         if (ratioPct <= THRESHOLD_DIP_PCT) {
             state->lowCount++;
-            if (state->lowCount >= MIN_CONSECUTIVE_LOW_SAMPLES) {
-                state->state = STATE_IN_DIP;
-                state->dipSampleCount = state->lowCount;
-                state->currentDipMinPct = ratioPct;
-            }
         } else {
             state->lowCount = 0;
+        }
+
+        if (ratioPct <= THRESHOLD_DEEP_DIP_PCT) {
+            state->deepLowCount++;
+        } else {
+            state->deepLowCount = 0;
+        }
+
+        if (state->lowCount >= MIN_CONSECUTIVE_LOW_SAMPLES ||
+            state->deepLowCount >= MIN_CONSECUTIVE_DEEP_LOW_SAMPLES) {
+            state->state = STATE_IN_DIP;
+            state->dipSampleCount = state->lowCount;
+            if (state->deepLowCount > state->dipSampleCount) {
+                state->dipSampleCount = state->deepLowCount;
+            }
+            state->currentDipMinPct = ratioPct;
         }
         return;
     }
@@ -143,14 +163,19 @@ static void update_detector(DetectorState *state, uint16_t currentLight) {
 
     if (ratioPct >= THRESHOLD_RECOVER_PCT) {
         if (state->dipSampleCount < MAX_DIP_SAMPLES) {
-            state->flickerCount++;
-            if (state->currentDipMinPct < state->minRatioPct) {
-                state->minRatioPct = state->currentDipMinPct;
+            // Simulator scenarios model steady-state behavior; startup suppression
+            // is firmware-specific and excluded from simulation checks.
+            if (state->currentDipMinPct <= MIN_COUNTED_DIP_PCT) {
+                state->flickerCount++;
+                if (state->currentDipMinPct < state->minRatioPct) {
+                    state->minRatioPct = state->currentDipMinPct;
+                }
             }
         }
 
         state->state = STATE_ARMED;
         state->lowCount = 0;
+        state->deepLowCount = 0;
         state->dipSampleCount = 0;
         state->currentDipMinPct = 100;
         return;
@@ -159,6 +184,7 @@ static void update_detector(DetectorState *state, uint16_t currentLight) {
     if (state->dipSampleCount >= MAX_DIP_SAMPLES) {
         state->state = STATE_ARMED;
         state->lowCount = 0;
+        state->deepLowCount = 0;
         state->dipSampleCount = 0;
         state->currentDipMinPct = 100;
     }
@@ -202,17 +228,18 @@ static void run_scenario(const Scenario *scenario) {
 
 static void run_recovery_threshold_boundary_test(void) {
     DetectorState detector;
+    const uint8_t recoverRatioPct = THRESHOLD_RECOVER_PCT;
     initialize_detector(&detector, 600u);
 
     detector.state = STATE_IN_DIP;
     detector.dipSampleCount = 10u;
-    detector.currentDipMinPct = 80u;
-    detector.fastAccumulator = (int32_t)95 << FAST_N;
+    detector.currentDipMinPct = MIN_COUNTED_DIP_PCT;
+    detector.fastAccumulator = (int32_t)recoverRatioPct << FAST_N;
     detector.slowAccumulator = (int32_t)100 << SLOW_N;
 
-    update_detector(&detector, 95u);
+    update_detector(&detector, recoverRatioPct);
 
-    printf("Scenario: recovery threshold boundary (ratio == 95)\n");
+    printf("Scenario: recovery threshold boundary (ratio == %u)\n", recoverRatioPct);
     printf("  Detected flickers: %u\n", detector.flickerCount);
     printf("  State after update: %u\n", (unsigned)detector.state);
 

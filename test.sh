@@ -215,15 +215,15 @@ run_rollover_boundary_analysis() {
 
     cat > "$tmpdir/LOG_000.CSV" <<'CSV'
 Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct
-86399,0,810,4000,0,100
+86399,0,810,3200,0,100
 CSV
 
     cat > "$tmpdir/LOG_001.CSV" <<'CSV'
 Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct
-86400,0,420,4000,1,58
-86401,0,810,4000,0,100
-86402,0,810,4000,0,100
-86403,0,810,4000,0,100
+86400,0,420,3200,1,58
+86401,0,810,3200,0,100
+86402,0,810,3200,0,100
+86403,0,810,3200,0,100
 CSV
 
     if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/summarize-firmware-flicker-logs.R'" | tee "$output_file"; then

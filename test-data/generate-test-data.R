@@ -11,7 +11,7 @@ make_address_stream <- function(address_value, seconds_total) {
     Uptime_s = 1:seconds_total,
     Address = address_value,
     Baseline_Light = sample(790:810, seconds_total, replace = TRUE),
-    Read_Count = sample(3990:4010, seconds_total, replace = TRUE),
+    Read_Count = sample(3190:3210, seconds_total, replace = TRUE),
     Flicker_Count = 0L,
     Min_Ratio_Pct = sample(96:100, seconds_total, replace = TRUE)
   )

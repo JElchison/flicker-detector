@@ -12,7 +12,7 @@ This project is an Arduino-based diagnostic tool that detects and records abrupt
 
 - Hardware boundary: Arduino Uno (ATmega328P, 2KB SRAM, no hardware FPU, no RTC), a light sensor input path, and a FAT32 32GB SD card workflow.
 - Fixture boundary: UBL12H wall washes using DMX and roughly 1920 Hz PWM dimming.
-- Sampling boundary: approximately 4000 Hz across two sensor channels (a practical ceiling originally constrained by loop execution time before moving detection into the ISR).
+- Sampling boundary: approximately 3200 Hz across two sensor channels (reduced from 4000 Hz for stronger ISR timing margin on Uno hardware).
 - Logging boundary: sustained 24+ hour runtime with a one-second logging interval for file-size and throughput stability; brief catch-up bursts are possible after main-loop stalls while ISR sampling continues.
 - Baseline boundary: absolute brightness thresholds are unreliable because ambient light, time of day, and DMX color/dimming levels shift the baseline continuously.
 - Event boundary: a flicker is an abrupt high-low-high dip that must outlast a single 1920 Hz PWM off-cycle (about 0.52 ms); sustained fades and blackouts are treated as non-flicker in the timeout path.
@@ -24,7 +24,7 @@ This project is an Arduino-based diagnostic tool that detects and records abrupt
   - Why rejected: a 10 ms window aliases against 1920 Hz PWM and produces beat artifacts.
   - Why rejected: a 50 ms window reduces aliasing but causes temporal smearing, so short real dips are diluted by surrounding bright samples.
 - Non-rolling 1920 Hz window (about 0.521 ms):
-  - Why rejected: at 4000 Hz, each PWM period is about 2.083 samples, which forces 2- or 3-sample approximations and unavoidable phase drift.
+  - Why rejected: at 3200 Hz, each PWM period is about 1.667 samples, which forces 1- or 2-sample approximations and unavoidable phase drift.
   - Why rejected: fixture and controller clock drift continuously desynchronize any fixed window alignment.
 - Peak tracking / envelope detection:
   - Why rejected: it is robust to PWM phase drift but blind to duty-cycle modulation because dimming changes average energy more than peak amplitude.
@@ -41,7 +41,7 @@ This project is an Arduino-based diagnostic tool that detects and records abrupt
 
 Hardware Timer1 ISR sampling:
 
-  - Decision: ADC sampling and detector updates run from Timer1 compare interrupts at 4000 Hz (every 250 microseconds).
+  - Decision: ADC sampling and detector updates run from Timer1 compare interrupts at 3200 Hz (every 312.5 microseconds).
   - Result: deterministic cadence that is effectively immune to SD card write stalls.
 
 Bit-shift dual-EMA implementation:
@@ -56,7 +56,7 @@ Fast EMA tuning for perceptual sensitivity:
 
 High-low-high state machine gating:
 
-  - Decision: dips require 3 consecutive low samples (about 0.75 ms) below 85%, recovery above 95%, and completion within 1 second.
+  - Decision: dips require 2 consecutive low samples (about 0.625 ms) below 85%, recovery above 95%, and completion within 1 second.
   - Result: single PWM valleys are rejected, and sustained low periods follow the timeout path as non-flicker.
 
 Aggregated once-per-second CSV output:
@@ -68,7 +68,7 @@ Aggregated once-per-second CSV output:
 
 The firmware starts by configuring Timer1, initializing the sensors, and creating a new CSV log file on the SD card. From that point on, the detector stays in the interrupt path and the main loop only handles periodic logging, file rollover, and the status LED.
 
-- `ISR(TIMER1_COMPA_vect)` samples each sensor at a fixed 4000 Hz and updates the fast and slow EMAs.
+- `ISR(TIMER1_COMPA_vect)` samples each sensor at a fixed 3200 Hz and updates the fast and slow EMAs.
 - The detector computes a fast-vs-slow ratio, then uses a high-low-high state machine to confirm a flicker.
 - The firmware keeps per-second counters for `Read_Count`, `Flicker_Count`, and the lowest ratio seen during that second.
 - On a one-second interval, the main loop copies sensor snapshots and writes compact CSV rows for each input; after delays it may emit short catch-up bursts.

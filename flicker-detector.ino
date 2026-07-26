@@ -3,7 +3,7 @@
 
 
 // --- Detector tuning --------------------------------------------------------
-const uint16_t SAMPLE_RATE_HZ = 4000;
+const uint16_t SAMPLE_RATE_HZ = 3200;
 const uint16_t PWM_REFRESH_HZ = 1920;  // cut sheet says 1.9 kHz
 // UBL12H fixtures dim with 1920 Hz PWM. A fast EMA around 80 Hz reacts quickly
 // enough to catch visible flicker while still rejecting the carrier ripple.
@@ -13,11 +13,22 @@ const uint8_t FAST_N = 3;
 const uint8_t SLOW_N = 12;
 // Dip/recovery thresholds are ratio-based so the detector follows the baseline
 // instead of depending on an absolute light level.
-const uint8_t THRESHOLD_DIP_PCT = 85;
-const uint8_t THRESHOLD_RECOVER_PCT = 95;
+const uint8_t THRESHOLD_DIP_PCT = 83;  // vs. MIN_CONSECUTIVE_LOW_SAMPLES
+const uint8_t THRESHOLD_DEEP_DIP_PCT = 79;  // vs. MIN_CONSECUTIVE_DEEP_LOW_SAMPLES
+const uint8_t THRESHOLD_RECOVER_PCT = 96;
+const uint8_t MIN_COUNTED_DIP_PCT = 78;  // flicker isn't counted unless it gets this low
 // Require multiple consecutive low samples so a PWM valley does not count as a
 // real flicker.
-const uint8_t MIN_CONSECUTIVE_LOW_SAMPLES = (SAMPLE_RATE_HZ / PWM_REFRESH_HZ) + 1;
+const uint8_t PWM_SAMPLES_PER_CYCLE =
+  (SAMPLE_RATE_HZ + PWM_REFRESH_HZ - 1) / PWM_REFRESH_HZ;
+// Standard dips need one extra sample beyond a PWM cycle for stronger noise
+// rejection. Deep dips can trigger at one-cycle length to preserve sensitivity
+// to short but severe flickers.
+const uint8_t MIN_CONSECUTIVE_LOW_SAMPLES = PWM_SAMPLES_PER_CYCLE + 1;
+const uint8_t MIN_CONSECUTIVE_DEEP_LOW_SAMPLES = PWM_SAMPLES_PER_CYCLE;
+const uint16_t STARTUP_SUPPRESS_MS = 10000UL;
+const uint32_t STARTUP_SUPPRESS_SAMPLES =
+  (uint32_t)SAMPLE_RATE_HZ * STARTUP_SUPPRESS_MS / 1000UL;
 // If the light stays low for a full second, classify it as a blackout/fade and
 // let the baseline continue adapting.
 const uint16_t DIP_TIMEOUT_MS = 1000;
@@ -34,24 +45,30 @@ const unsigned long ONE_DAY_MS = 24UL * 60UL * 60UL * 1000UL;
 const uint16_t TIMER1_TARGET_HZ = SAMPLE_RATE_HZ;
 // Timer1 uses CS12:CS11:CS10 = 0:1:0 in configureTimer1() (CS11 set only),
 // which is the datasheet's /8 prescaler mode. That makes a 16 MHz Uno tick
-// Timer1 at 2 MHz, so OCR1A can be set to 499 for a 4000 Hz ISR cadence.
+// Timer1 at 2 MHz, so OCR1A can be set to 624 for a 3200 Hz ISR cadence.
 const uint8_t TIMER1_PRESCALER = 8;
 // On an Uno, F_CPU is 16 MHz. With an 8x prescaler, Timer1 ticks at 2 MHz,
-// so 2,000,000 / 4000 - 1 = 499.
+// so 2,000,000 / 3200 - 1 = 624.
 const uint16_t TIMER1_TOP = (F_CPU / (TIMER1_PRESCALER * TIMER1_TARGET_HZ)) - 1;
 
 static_assert(TIMER1_PRESCALER == 8,
               "TIMER1_PRESCALER must match CS12:CS11:CS10 = 0:1:0 (/8 mode).");
 static_assert((F_CPU % (TIMER1_PRESCALER * TIMER1_TARGET_HZ)) == 0,
               "Timer1 divisor must divide F_CPU exactly for stable ISR cadence.");
-static_assert(TIMER1_TOP == 499,
-              "Expected Uno Timer1 TOP is 499 for 4000 Hz ISR at 16 MHz with /8 prescaler.");
+static_assert(TIMER1_TOP == 624,
+              "Expected Uno Timer1 TOP is 624 for 3200 Hz ISR at 16 MHz with /8 prescaler.");
 static_assert(TIMER1_TOP <= 0xFFFF,
               "TIMER1_TOP must fit in the 16-bit OCR1A register.");
 static_assert(THRESHOLD_DIP_PCT < THRESHOLD_RECOVER_PCT,
               "Dip threshold must be below recovery threshold.");
-static_assert(MIN_CONSECUTIVE_LOW_SAMPLES >= 2,
-              "Minimum low samples must reject a single PWM valley.");
+static_assert(THRESHOLD_DEEP_DIP_PCT <= THRESHOLD_DIP_PCT,
+              "Deep dip threshold must be less than or equal to dip threshold.");
+static_assert(MIN_COUNTED_DIP_PCT <= THRESHOLD_DEEP_DIP_PCT,
+              "Counted dip threshold must be at or below deep-dip threshold.");
+static_assert(MIN_CONSECUTIVE_LOW_SAMPLES >= 3,
+              "Minimum low samples must reject PWM valleys at reduced sample rates.");
+static_assert(MIN_CONSECUTIVE_DEEP_LOW_SAMPLES >= 2,
+              "Deep dip gate still needs at least two consecutive low samples.");
 
 File logFile;
 char currentFileName[13];
@@ -77,8 +94,10 @@ struct SensorRuntime {
   volatile uint8_t minRatio_pct;
   volatile uint8_t state;
   volatile uint8_t lowCount;
+  volatile uint8_t deepLowCount;
   volatile uint16_t dipSampleCount;
   volatile uint8_t currentDipMin_pct;
+  volatile uint32_t sampleCountSinceBoot;
 };
 
 struct SensorSnapshot {
@@ -106,6 +125,14 @@ void resetSensorSecondCounters(SensorRuntime &sensor) {
   sensor.minRatio_pct = 100;
 }
 
+void configureAdcForIsrSampling() {
+  // Two analogRead() calls run inside a 3200 Hz ISR. The default ADC /128 clock
+  // can overrun that budget and starve loop(). Use /32 for extra headroom.
+  // This trades some ADC precision for timing margin, which is acceptable here
+  // because the detector uses relative EMA ratios rather than absolute lux.
+  ADCSRA = (ADCSRA & ~(_BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0))) | _BV(ADPS2) | _BV(ADPS0);
+}
+
 void initializeSensor(SensorRuntime &sensor, uint8_t address, uint8_t pin) {
   sensor.address = address;
   sensor.pin = pin;
@@ -119,8 +146,10 @@ void initializeSensor(SensorRuntime &sensor, uint8_t address, uint8_t pin) {
   sensor.minRatio_pct = 100;
   sensor.state = STATE_ARMED;
   sensor.lowCount = 0;
+  sensor.deepLowCount = 0;
   sensor.dipSampleCount = 0;
   sensor.currentDipMin_pct = 100;
+  sensor.sampleCountSinceBoot = 0;
 }
 
 void initializeSensors() {
@@ -193,6 +222,7 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
 
   sensor.baselineLight = slowLight;
   sensor.readCount++;
+  sensor.sampleCountSinceBoot++;
 
   uint8_t ratio_pct = 100;
   if (slowLight > 10) {
@@ -209,13 +239,24 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
   if (sensor.state == STATE_ARMED) {
     if (ratio_pct <= THRESHOLD_DIP_PCT) {
       sensor.lowCount++;
-      if (sensor.lowCount >= MIN_CONSECUTIVE_LOW_SAMPLES) {
-        sensor.state = STATE_IN_DIP;
-        sensor.dipSampleCount = sensor.lowCount;
-        sensor.currentDipMin_pct = ratio_pct;
-      }
     } else {
       sensor.lowCount = 0;
+    }
+
+    if (ratio_pct <= THRESHOLD_DEEP_DIP_PCT) {
+      sensor.deepLowCount++;
+    } else {
+      sensor.deepLowCount = 0;
+    }
+
+    if (sensor.lowCount >= MIN_CONSECUTIVE_LOW_SAMPLES ||
+        sensor.deepLowCount >= MIN_CONSECUTIVE_DEEP_LOW_SAMPLES) {
+        sensor.state = STATE_IN_DIP;
+        sensor.dipSampleCount = sensor.lowCount;
+        if (sensor.deepLowCount > sensor.dipSampleCount) {
+          sensor.dipSampleCount = sensor.deepLowCount;
+        }
+        sensor.currentDipMin_pct = ratio_pct;
     }
     return;
   }
@@ -227,14 +268,18 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
 
   if (ratio_pct >= THRESHOLD_RECOVER_PCT) {
     if (sensor.dipSampleCount < MAX_DIP_SAMPLES) {
-      sensor.flickerCount++;
-      if (sensor.currentDipMin_pct < sensor.minRatio_pct) {
-        sensor.minRatio_pct = sensor.currentDipMin_pct;
+      if (sensor.sampleCountSinceBoot >= STARTUP_SUPPRESS_SAMPLES &&
+          sensor.currentDipMin_pct <= MIN_COUNTED_DIP_PCT) {
+        sensor.flickerCount++;
+        if (sensor.currentDipMin_pct < sensor.minRatio_pct) {
+          sensor.minRatio_pct = sensor.currentDipMin_pct;
+        }
       }
     }
 
     sensor.state = STATE_ARMED;
     sensor.lowCount = 0;
+    sensor.deepLowCount = 0;
     sensor.dipSampleCount = 0;
     sensor.currentDipMin_pct = 100;
     return;
@@ -243,6 +288,7 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
   if (sensor.dipSampleCount >= MAX_DIP_SAMPLES) {
     sensor.state = STATE_ARMED;
     sensor.lowCount = 0;
+    sensor.deepLowCount = 0;
     sensor.dipSampleCount = 0;
     sensor.currentDipMin_pct = 100;
   }
@@ -313,6 +359,8 @@ void setup() {
   }
   Serial.println("SD card initialized.");
 
+  configureAdcForIsrSampling();
+
   initializeSensors();
   createNewLogFile();
 
@@ -322,7 +370,7 @@ void setup() {
 
   configureTimer1();
   validateTimer1ConfigOrHalt();
-  Serial.println("System armed. Timer1 ISR sampling at 4000 Hz.");
+  Serial.println("System armed. Timer1 ISR sampling at 3200 Hz.");
 }
 
 void loop() {
