@@ -310,6 +310,24 @@ ISR(TIMER1_COMPA_vect) {
   }
 }
 
+void printUptimeHms(unsigned long uptimeSeconds) {
+  unsigned long hours = uptimeSeconds / 3600UL;
+  unsigned int minutes = (uptimeSeconds % 3600UL) / 60UL;
+  unsigned int seconds = uptimeSeconds % 60UL;
+
+  Serial.print(hours);
+  Serial.print(":");
+  if (minutes < 10) {
+    Serial.print("0");
+  }
+  Serial.print(minutes);
+  Serial.print(":");
+  if (seconds < 10) {
+    Serial.print("0");
+  }
+  Serial.print(seconds);
+}
+
 void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long uptimeSeconds) {
   file.print(uptimeSeconds);
   file.print(",");
@@ -325,13 +343,18 @@ void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long up
   file.print(",");
   file.println(snapshot.dipSampleCountPerSecond);
 
+  // only print to Serial if there was at least one flicker detected
+  if (snapshot.flickerCount == 0) {
+    return;
+  }
+
   Serial.print("File: ");
   Serial.print(currentFileName);
   Serial.print(" | Addr: ");
   Serial.print(snapshot.address);
   Serial.print(" | Uptime: ");
-  Serial.print(uptimeSeconds);
-  Serial.print("s | Baseline: ");
+  printUptimeHms(uptimeSeconds);
+  Serial.print(" | Baseline: ");
   Serial.print(snapshot.baselineLight);
   Serial.print(" | Reads/sec: ");
   Serial.print(snapshot.readCount);
