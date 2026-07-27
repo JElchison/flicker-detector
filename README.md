@@ -176,18 +176,14 @@ The output will look like this:
 
 ```text
 === Address 0 ===
-# A tibble: 2 × 7
-  filename    Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct
-  <chr>       <chr>        <int>          <dbl>      <dbl>         <int>         <int>
-1 LOG_000.CSV 0:05:00          0            450       3998             1            64
-2 LOG_000.CSV 1:08:00          0            420       4001             2            58
+    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count
+ LOG_000.CSV    0:05:00       0            450       3193             1            64              233
+ LOG_000.CSV    1:08:00       0            420       3202             2            58              233
 
 === Address 1 ===
-# A tibble: 2 × 7
-  filename    Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct
-  <chr>       <chr>        <int>          <dbl>      <dbl>         <int>         <int>
-1 LOG_000.CSV 0:15:00          1            430       4002             1            61
-2 LOG_000.CSV 1:00:00          1            410       3996             1            55
+    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count
+ LOG_000.CSV    0:15:00       1            430       3206             1            61              169
+ LOG_000.CSV    1:00:00       1            410       3206             1            55              187
 ```
 
 * **filename** & **Uptime_hms:** The exact file and second the flicker occurred.
