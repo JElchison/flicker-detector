@@ -216,16 +216,16 @@ run_rollover_boundary_analysis() {
     output_file="$(mktemp)"
 
     cat > "$tmpdir/LOG_000.CSV" <<'CSV'
-Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count
-86399,0,810,3200,0,100,0
+Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count,Dip_ms,Human_Visibility_Score
+86399,0,810,3200,0,100,0,0,0
 CSV
 
     cat > "$tmpdir/LOG_001.CSV" <<'CSV'
-Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count
-86400,0,420,3200,1,58,180
-86401,0,810,3200,0,100,0
-86402,0,810,3200,0,100,0
-86403,0,810,3200,0,100,0
+Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count,Dip_ms,Human_Visibility_Score
+86400,0,420,3200,1,58,180,56,48
+86401,0,810,3200,0,100,0,0,0
+86402,0,810,3200,0,100,0,0,0
+86403,0,810,3200,0,100,0,0,0
 CSV
 
     if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/summarize-firmware-flicker-logs.R'" | tee "$output_file"; then

@@ -24,7 +24,9 @@ result_cols <- c(
   "Read_Count",
   "Flicker_Count",
   "Min_Ratio_Pct",
-  "Dip_Sample_Count"
+  "Dip_Sample_Count",
+  "Dip_ms",
+  "Human_Visibility_Score"
 )
 
 load_one_log <- function(file) {
@@ -50,6 +52,16 @@ load_one_log <- function(file) {
       Min_Ratio_Pct = as.integer(.data$Min_Ratio_Pct),
       Dip_Sample_Count = if ("Dip_Sample_Count" %in% names(temp_df)) {
         as.integer(.data$Dip_Sample_Count)
+      } else {
+        NA_integer_
+      },
+      Dip_ms = if ("Dip_ms" %in% names(temp_df)) {
+        as.integer(.data$Dip_ms)
+      } else {
+        NA_integer_
+      },
+      Human_Visibility_Score = if ("Human_Visibility_Score" %in% names(temp_df)) {
+        as.integer(.data$Human_Visibility_Score)
       } else {
         NA_integer_
       }

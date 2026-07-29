@@ -15,7 +15,7 @@ This project is an Arduino-based diagnostic tool that detects and records abrupt
 - Sampling boundary: approximately 3200 Hz across two sensor channels (reduced from 4000 Hz for stronger ISR timing margin on Uno hardware).
 - Logging boundary: sustained 24+ hour runtime with a one-second logging interval for file-size and throughput stability; brief catch-up bursts are possible after main-loop stalls while ISR sampling continues.
 - Baseline boundary: absolute brightness thresholds are unreliable because ambient light, time of day, and DMX color/dimming levels shift the baseline continuously.
-- Event boundary: a flicker is an abrupt high-low-high dip that must outlast a single 1920 Hz PWM off-cycle (about 0.52 ms); sustained fades and blackouts are treated as non-flicker in the timeout path.
+- Event boundary: a flicker is an abrupt high-low-high dip. Entry/recovery use ratio gates and consecutive-sample requirements; long dips are tracked continuously until recovery (no timeout reset fragmentation).
 
 ### Rejected Approaches & Rationale
 
@@ -56,13 +56,21 @@ Fast EMA tuning for perceptual sensitivity:
 
 High-low-high state machine gating:
 
-  - Decision: dips require 2 consecutive low samples (about 0.625 ms) below 85%, recovery above 95%, and completion within 1 second.
-  - Result: single PWM valleys are rejected, and sustained low periods follow the timeout path as non-flicker.
+  - Decision: dips arm below 83% (standard) or 79% (deep path) with consecutive-sample gates, and recover above 96%.
+  - Decision: counted dips must also reach 75% or lower at least once, and startup suppression avoids early boot transients.
+  - Decision: output filtering suppresses short + shallow rows (Dip_ms < 6 and Min_Ratio_Pct > 70) to reduce nuisance events.
+  - Result: single PWM valleys are rejected while sensitivity is preserved for deeper visible dips.
 
 Aggregated once-per-second CSV output:
 
-  - Decision: the main loop logs only one summary row per sensor each second.
-  - Result: compact long-run logs with Uptime_s, Address, Baseline_Light, Read_Count, Flicker_Count, and Min_Ratio_Pct (depth percentage proxy; lower means deeper dip), ready for downstream analysis.
+  - Decision: the main loop logs one summary row per sensor each second.
+  - Result: compact long-run logs with Uptime_s, Address, Baseline_Light, Read_Count, Flicker_Count, Min_Ratio_Pct, Dip_Sample_Count, Dip_ms, and Human_Visibility_Score.
+  - Note: Dip_ms is computed from Dip_Sample_Count in the same one-second row (Dip_ms ~= Dip_Sample_Count / 3200 * 1000).
+
+Event-only serial diagnostics:
+
+  - Decision: serial prints only rows with Flicker_Count > 0 and inserts a spacer line after >5 s event gaps.
+  - Result: easier live review during fixture testing with less serial noise.
 
 ## Method
 
@@ -70,8 +78,9 @@ The firmware starts by configuring Timer1, initializing the sensors, and creatin
 
 - `ISR(TIMER1_COMPA_vect)` samples each sensor at a fixed 3200 Hz and updates the fast and slow EMAs.
 - The detector computes a fast-vs-slow ratio, then uses a high-low-high state machine to confirm a flicker.
-- The firmware keeps per-second counters for `Read_Count`, `Flicker_Count`, and the lowest ratio seen during that second.
+- The firmware keeps per-second counters for `Read_Count`, `Flicker_Count`, the lowest ratio seen in that second, and how many samples fell below the dip threshold.
 - On a one-second interval, the main loop copies sensor snapshots and writes compact CSV rows for each input; after delays it may emit short catch-up bursts.
+- Before writing, a short+shallow post-filter can suppress rows (`Dip_ms < 6` and `Min_Ratio_Pct > 70`) to reduce nuisance detections.
 - On reboot or after 24 hours, the logger creates the next `LOG_XXX.CSV` file and continues without changing the detector logic.
 
 ### Handling LED PWM Dimming
@@ -138,9 +147,15 @@ Each CSV row now includes an `Address` column:
 
 The `Read_Count` column tracks system health per address - it should show roughly the same number of sensor reads every second.
 
-The `Flicker_Count` column records how many high-low-high events were confirmed in that second.
+The `Flicker_Count` column records how many high-low-high events were confirmed in that second (after short+shallow row filtering).
 
 The `Min_Ratio_Pct` column records the deepest ratio dip seen that second, where lower numbers mean a more severe flicker.
+
+The `Dip_Sample_Count` column records how many ISR samples in that second were at or below the dip threshold.
+
+The `Dip_ms` column converts `Dip_Sample_Count` to milliseconds for that same second.
+
+`Human_Visibility_Score` is a 0-100 heuristic combining depth, dip duration, and flicker count.
 
 ## Data Analysis
 
@@ -176,14 +191,14 @@ The output will look like this:
 
 ```text
 === Address 0 ===
-    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count
- LOG_000.CSV    0:05:00       0            450       3193             1            64              233
- LOG_000.CSV    1:08:00       0            420       3202             2            58              233
+    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
+ LOG_000.CSV    0:05:00       0            450       3202             1            64              180     56                     44
+ LOG_000.CSV    1:08:00       0            420       3207             2            58              101     32                     57
 
 === Address 1 ===
-    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count
- LOG_000.CSV    0:15:00       1            430       3206             1            61              169
- LOG_000.CSV    1:00:00       1            410       3206             1            55              187
+    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
+ LOG_000.CSV    0:15:00       1            430       3194             1            61              218     68                     37
+ LOG_000.CSV    1:00:00       1            410       3207             1            55              206     64                     75
 ```
 
 * **filename** & **Uptime_hms:** The exact file and second the flicker occurred.
@@ -191,6 +206,8 @@ The output will look like this:
 * **Baseline_Light:** The slow EMA baseline that the fast EMA is compared against.
 * **Flicker_Count:** How many valid high-low-high events the Arduino confirmed in that second.
 * **Min_Ratio_Pct:** The lowest fast-vs-slow ratio seen that second. Lower numbers mean deeper dips.
+* **Dip_Sample_Count / Dip_ms:** How much of that second was under dip threshold, in samples and milliseconds.
+* **Human_Visibility_Score:** 0-100 heuristic score to prioritize likely noticeable events.
 
 ## Validation
 

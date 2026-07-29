@@ -29,10 +29,14 @@ const uint8_t MIN_CONSECUTIVE_DEEP_LOW_SAMPLES = PWM_SAMPLES_PER_CYCLE;
 const uint16_t STARTUP_SUPPRESS_MS = 10000UL;
 const uint32_t STARTUP_SUPPRESS_SAMPLES =
   (uint32_t)SAMPLE_RATE_HZ * STARTUP_SUPPRESS_MS / 1000UL;
-// If the light stays low for a full second, classify it as a blackout/fade and
-// let the baseline continue adapting.
+// Dip duration cap for the internal per-event counter while in STATE_IN_DIP.
+// The state machine no longer times out/reset on long dips; it waits for
+// recovery and keeps this counter saturated at MAX_DIP_SAMPLES.
 const uint16_t DIP_TIMEOUT_MS = 1000;
 const uint16_t MAX_DIP_SAMPLES = (SAMPLE_RATE_HZ * DIP_TIMEOUT_MS) / 1000UL;
+// Suppress short + shallow rows in output: Dip_ms < 6 and Min_Ratio_Pct > 70.
+const uint16_t MIN_IGNORED_DIP_MS = 6;
+const uint8_t MAX_IGNORED_MIN_RATIO_PCT = 70;
 
 // --- Hardware pins ----------------------------------------------------------
 const int chipSelect = 4;
@@ -77,6 +81,8 @@ unsigned long lastLogTime_ms = 0;
 unsigned long lastBlinkTime_ms = 0;
 unsigned long lastRolloverTime_ms = 0;
 bool ledState = LOW;
+bool hasLastFlickerEvent = false;
+unsigned long lastFlickerEventUptime_s = 0;
 
 enum DetectionState : uint8_t {
   STATE_ARMED = 0,
@@ -93,6 +99,9 @@ struct SensorRuntime {
   volatile uint16_t flickerCount;
   volatile uint8_t minRatio_pct;
   volatile uint16_t dipSampleCountPerSecond;
+  // Tracks longest counted dip in the current one-second bucket for optional
+  // diagnostics. Current Dip_ms output is derived from dipSampleCountPerSecond.
+  volatile uint16_t maxEventDipSampleCount;
   volatile uint8_t state;
   volatile uint8_t lowCount;
   volatile uint8_t deepLowCount;
@@ -108,6 +117,7 @@ struct SensorSnapshot {
   uint16_t flickerCount;
   uint8_t minRatio_pct;
   uint16_t dipSampleCountPerSecond;
+  uint16_t maxEventDipSampleCount;
 };
 
 SensorRuntime sensors[SENSOR_COUNT];
@@ -126,6 +136,7 @@ void resetSensorSecondCounters(SensorRuntime &sensor) {
   sensor.flickerCount = 0;
   sensor.minRatio_pct = 100;
   sensor.dipSampleCountPerSecond = 0;
+  sensor.maxEventDipSampleCount = 0;
 }
 
 void configureAdcForIsrSampling() {
@@ -148,6 +159,7 @@ void initializeSensor(SensorRuntime &sensor, uint8_t address, uint8_t pin) {
   sensor.flickerCount = 0;
   sensor.minRatio_pct = 100;
   sensor.dipSampleCountPerSecond = 0;
+  sensor.maxEventDipSampleCount = 0;
   sensor.state = STATE_ARMED;
   sensor.lowCount = 0;
   sensor.deepLowCount = 0;
@@ -178,7 +190,7 @@ void createNewLogFile() {
     triggerError();
   }
 
-  logFile.println("Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count");
+  logFile.println("Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sample_Count,Dip_ms,Human_Visibility_Score");
   logFile.close();
   Serial.print("Created new log file: ");
   Serial.println(currentFileName);
@@ -270,16 +282,21 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
     return;
   }
 
-  sensor.dipSampleCount++;
+  if (sensor.dipSampleCount < MAX_DIP_SAMPLES) {
+    sensor.dipSampleCount++;
+  }
   if (ratio_pct < sensor.currentDipMin_pct) {
     sensor.currentDipMin_pct = ratio_pct;
   }
 
   if (ratio_pct >= THRESHOLD_RECOVER_PCT) {
-    if (sensor.dipSampleCount < MAX_DIP_SAMPLES) {
+    if (sensor.dipSampleCount <= MAX_DIP_SAMPLES) {
       if (sensor.sampleCountSinceBoot >= STARTUP_SUPPRESS_SAMPLES &&
           sensor.currentDipMin_pct <= MIN_COUNTED_DIP_PCT) {
         sensor.flickerCount++;
+        if (sensor.dipSampleCount > sensor.maxEventDipSampleCount) {
+          sensor.maxEventDipSampleCount = sensor.dipSampleCount;
+        }
         if (sensor.currentDipMin_pct < sensor.minRatio_pct) {
           sensor.minRatio_pct = sensor.currentDipMin_pct;
         }
@@ -294,13 +311,8 @@ void updateSensorState(SensorRuntime &sensor, uint16_t currentLight) {
     return;
   }
 
-  if (sensor.dipSampleCount >= MAX_DIP_SAMPLES) {
-    sensor.state = STATE_ARMED;
-    sensor.lowCount = 0;
-    sensor.deepLowCount = 0;
-    sensor.dipSampleCount = 0;
-    sensor.currentDipMin_pct = 100;
-  }
+  // No timeout reset: keep tracking the same dip until recovery so long
+  // blackouts are not fragmented into tiny tail events.
 }
 
 ISR(TIMER1_COMPA_vect) {
@@ -315,6 +327,9 @@ void printUptimeHms(unsigned long uptimeSeconds) {
   unsigned int minutes = (uptimeSeconds % 3600UL) / 60UL;
   unsigned int seconds = uptimeSeconds % 60UL;
 
+  if (hours < 10UL) {
+    Serial.print("0");
+  }
   Serial.print(hours);
   Serial.print(":");
   if (minutes < 10) {
@@ -328,7 +343,52 @@ void printUptimeHms(unsigned long uptimeSeconds) {
   Serial.print(seconds);
 }
 
+uint16_t dipSamplesToMs(uint16_t dipSampleCount) {
+  // Rounded conversion from sample counts to milliseconds at SAMPLE_RATE_HZ.
+  return (uint16_t)(((uint32_t)dipSampleCount * 1000UL + (SAMPLE_RATE_HZ / 2U)) / SAMPLE_RATE_HZ);
+}
+
+bool shouldIgnoreEventRow(uint16_t dip_ms, uint8_t minRatio_pct) {
+  return dip_ms < MIN_IGNORED_DIP_MS && minRatio_pct > MAX_IGNORED_MIN_RATIO_PCT;
+}
+
+uint8_t computeHumanVisibilityScore(uint16_t flickerCount, uint8_t minRatio_pct, uint16_t dip_ms) {
+  if (flickerCount == 0) {
+    return 0;
+  }
+
+  uint8_t depthScore = 0;
+  if (minRatio_pct < 100) {
+    depthScore = 100 - minRatio_pct;
+  }
+
+  uint8_t durationScore = (dip_ms >= 100U)
+    ? 100
+    : (uint8_t)((dip_ms * 100U) / 100U);
+  uint8_t countScore = (flickerCount >= 5U)
+    ? 100
+    : (uint8_t)(flickerCount * 20U);
+
+  uint16_t weighted = (uint16_t)depthScore * 60U
+                    + (uint16_t)durationScore * 30U
+                    + (uint16_t)countScore * 10U;
+  return (uint8_t)(weighted / 100U);
+}
+
 void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long uptimeSeconds) {
+  // Dip_ms is intentionally per-row/per-second occupancy under THRESHOLD_DIP_PCT.
+  uint16_t dip_ms = dipSamplesToMs(snapshot.dipSampleCountPerSecond);
+  uint16_t filteredFlickerCount = snapshot.flickerCount;
+  if (filteredFlickerCount > 0 && shouldIgnoreEventRow(dip_ms, snapshot.minRatio_pct)) {
+    filteredFlickerCount = 0;
+    dip_ms = 0;
+  }
+  uint8_t humanVisibilityScore = computeHumanVisibilityScore(
+    filteredFlickerCount,
+    snapshot.minRatio_pct,
+    dip_ms
+  );
+
   file.print(uptimeSeconds);
   file.print(",");
   file.print(snapshot.address);
@@ -337,15 +397,28 @@ void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long up
   file.print(",");
   file.print(snapshot.readCount);
   file.print(",");
-  file.print(snapshot.flickerCount);
+  file.print(filteredFlickerCount);
   file.print(",");
   file.print(snapshot.minRatio_pct);
   file.print(",");
-  file.println(snapshot.dipSampleCountPerSecond);
+  file.print(snapshot.dipSampleCountPerSecond);
+  file.print(",");
+  file.print(dip_ms);
+  file.print(",");
+  file.println(humanVisibilityScore);
 
   // only print to Serial if there was at least one flicker detected
-  if (snapshot.flickerCount == 0) {
+  if (filteredFlickerCount == 0) {
     return;
+  }
+
+  if (hasLastFlickerEvent) {
+    unsigned long gap_s = uptimeSeconds - lastFlickerEventUptime_s;
+    if (uptimeSeconds > lastFlickerEventUptime_s && gap_s > 5UL) {
+      Serial.print("---------- ");
+      printUptimeHms(gap_s);
+      Serial.println(" gap since last event ----------");
+    }
   }
 
   Serial.print("File: ");
@@ -359,11 +432,18 @@ void writeSensorRow(File &file, const SensorSnapshot &snapshot, unsigned long up
   Serial.print(" | Reads/sec: ");
   Serial.print(snapshot.readCount);
   Serial.print(" | Flickers/sec: ");
-  Serial.print(snapshot.flickerCount);
+  Serial.print(filteredFlickerCount);
   Serial.print(" | Min ratio: ");
   Serial.print(snapshot.minRatio_pct);
   Serial.print(" | Dip samples/sec: ");
-  Serial.println(snapshot.dipSampleCountPerSecond);
+  Serial.print(snapshot.dipSampleCountPerSecond);
+  Serial.print(" | Dip ms: ");
+  Serial.print(dip_ms);
+  Serial.print(" | HVS: ");
+  Serial.println(humanVisibilityScore);
+
+  hasLastFlickerEvent = true;
+  lastFlickerEventUptime_s = uptimeSeconds;
 }
 
 void copyAndResetSecondCounters() {
@@ -375,6 +455,7 @@ void copyAndResetSecondCounters() {
     snapshots[i].flickerCount = sensors[i].flickerCount;
     snapshots[i].minRatio_pct = sensors[i].minRatio_pct;
     snapshots[i].dipSampleCountPerSecond = sensors[i].dipSampleCountPerSecond;
+    snapshots[i].maxEventDipSampleCount = sensors[i].maxEventDipSampleCount;
     resetSensorSecondCounters(sensors[i]);
   }
   interrupts();
