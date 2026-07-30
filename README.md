@@ -254,6 +254,12 @@ FFT plot saved: flicker-fft-period-spectrum-address-0.png, flicker-fft-period-sp
 * **flicker-fft-period-spectrum-address-N.png:** Per-address FFT period plots so you can spot periodic flicker spacing (for example near 63 minutes).
 * **Peak-Interval Flickers table:** Timestamp pairs whose spacing is close to the dominant FFT period for that address.
 
+Generated FFT plots look like this (generated from the above sample data):
+
+<img width="1400" height="900" alt="flicker-fft-period-spectrum-address-0" src="https://github.com/user-attachments/assets/a80be437-5c94-4909-a5e8-6783b1937196" />
+
+<img width="1400" height="900" alt="flicker-fft-period-spectrum-address-1" src="https://github.com/user-attachments/assets/a0d97256-4705-45a3-adad-2cb5b6806535" />
+
 ## Validation
 
 The repository includes a single `test.sh` harness that exercises the important paths end to end.
