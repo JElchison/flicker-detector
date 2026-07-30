@@ -159,7 +159,12 @@ The `Dip_ms` column converts `Dip_Sample_Count` to milliseconds for that same se
 
 ## Data Analysis
 
-The Arduino now does the actual flicker detection. The provided R script (`summarize-firmware-flicker-logs.R`) is optional and only helps summarize the already-classified CSV logs.
+The Arduino now does the actual flicker detection. The provided R script (`analyze-firmware-flicker-logs.R`) is optional and only helps summarize the already-classified CSV logs.
+
+The analysis script is backward-compatible with older CSV formats:
+- If `Human_Visibility_Score` is missing, the script back-calculates it using the same weighted formula as the firmware (`depth 60%`, `duration 30%`, `count 10%`).
+- If `Dip_ms` is missing but `Dip_Sample_Count` is present, `Dip_ms` is reconstructed using the firmware sample rate (3200 Hz).
+- Very old logs that predate `Flicker_Count` are still readable for table stitching, but they naturally produce no flicker-event rows and therefore no FFT peak analysis.
 
 ### Prerequisites
 You will need to have [R](https://cran.r-project.org/) installed on your computer. 
@@ -174,31 +179,69 @@ The easiest way to process your data is directly from your computer's terminal o
 
 1. Remove the MicroSD card from your Arduino and plug it into your computer.
 2. Copy all of the `LOG_XXX.CSV` files from the SD card into a single folder on your computer.
-3. Save the `summarize-firmware-flicker-logs.R` script into that exact same folder.
+3. Save the `analyze-firmware-flicker-logs.R` script into that exact same folder.
 4. Open your terminal/command prompt and navigate to that folder:
    ```bash
    cd path/to/your/folder
    ```
 5. Execute the script:
    ```bash
-   Rscript --vanilla summarize-firmware-flicker-logs.R
+  Rscript --vanilla analyze-firmware-flicker-logs.R
    ```
 
 ### Reading the Output
-The script will automatically stitch all of your daily log files together in chronological order and print the rows where `Flicker_Count > 0`.
+The script stitches your `LOG_XXX.CSV` files together and now emits three analysis sections:
+
+1. A per-address flicker event dump (`Flicker_Count > 0`).
+2. FFT period-spectrum plots (one PNG per address) using:
+  - x-axis: inferred period in minutes (from FFT frequency bins)
+  - y-axis: FFT amplitude of the `Human_Visibility_Score` event signal
+3. A per-address table of timestamped flicker pairs that match that address's dominant FFT period.
+
+By default, the script writes one file per address in the form `flicker-fft-period-spectrum-address-N.png`.
+
+If you run the script interactively (for example via `source()` inside RStudio), the same FFT plots are also rendered to the active graphics device while still being saved to PNG files.
+
+The FFT chart always includes at least a 0-75 minute domain, then extends to the right as far as the available capture length supports.
 
 The output will look like this:
 
 ```text
 === Address 0 ===
-    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
- LOG_000.CSV    0:05:00       0            450       3202             1            64              180     56                     44
- LOG_000.CSV    1:08:00       0            420       3207             2            58              101     32                     57
+    filename Uptime_s Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
+ LOG_000.CSV      300    0:05:00       0            450       3195             1            64              100     31                     90
+ LOG_000.CSV     4080    1:08:00       0            430       3198             1            62              104     32                     32
+ LOG_000.CSV     7860    2:11:00       0            420       3195             2            58               81     25                     52
+ LOG_000.CSV    11640    3:14:00       0            415       3209             1            60              195     61                     39
+ LOG_000.CSV    15420    4:17:00       0            425       3193             2            57              128     40                     57
 
 === Address 1 ===
-    filename Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
- LOG_000.CSV    0:15:00       1            430       3194             1            61              218     68                     37
- LOG_000.CSV    1:00:00       1            410       3207             1            55              206     64                     75
+    filename Uptime_s Uptime_hms Address Baseline_Light Read_Count Flicker_Count Min_Ratio_Pct Dip_Sample_Count Dip_ms Human_Visibility_Score
+ LOG_000.CSV      900    0:15:00       1            430       3202             1            61              109     34                     62
+ LOG_000.CSV     3600    1:00:00       1            420       3193             1            59              129     40                     60
+ LOG_000.CSV     6300    1:45:00       1            410       3205             1            55              147     46                     54
+ LOG_000.CSV     9000    2:30:00       1            405       3197             2            54              135     42                     43
+ LOG_000.CSV    11700    3:15:00       1            412       3209             1            57              228     71                     46
+ LOG_000.CSV    14400    4:00:00       1            409       3202             1            56              148     46                     68
+ LOG_000.CSV    17100    4:45:00       1            407       3197             2            53              109     34                     53
+
+FFT plot saved: flicker-fft-period-spectrum-address-0.png, flicker-fft-period-spectrum-address-1.png 
+
+=== Address 0 Peak-Interval Flickers (63.000 min) ===
+    filename Uptime_hms Human_Visibility_Score Next_filename Next_Uptime_hms Next_Human_Visibility_Score Interval_minutes Peak_period_minutes
+ LOG_000.CSV    0:05:00                     90   LOG_000.CSV         1:08:00                          32               63                  63
+ LOG_000.CSV    1:08:00                     32   LOG_000.CSV         2:11:00                          52               63                  63
+ LOG_000.CSV    2:11:00                     52   LOG_000.CSV         3:14:00                          39               63                  63
+ LOG_000.CSV    3:14:00                     39   LOG_000.CSV         4:17:00                          57               63                  63
+
+=== Address 1 Peak-Interval Flickers (45.000 min) ===
+    filename Uptime_hms Human_Visibility_Score Next_filename Next_Uptime_hms Next_Human_Visibility_Score Interval_minutes Peak_period_minutes
+ LOG_000.CSV    0:15:00                     62   LOG_000.CSV         1:00:00                          60               45                  45
+ LOG_000.CSV    1:00:00                     60   LOG_000.CSV         1:45:00                          54               45                  45
+ LOG_000.CSV    1:45:00                     54   LOG_000.CSV         2:30:00                          43               45                  45
+ LOG_000.CSV    2:30:00                     43   LOG_000.CSV         3:15:00                          46               45                  45
+ LOG_000.CSV    3:15:00                     46   LOG_000.CSV         4:00:00                          68               45                  45
+ LOG_000.CSV    4:00:00                     68   LOG_000.CSV         4:45:00                          53               45                  45
 ```
 
 * **filename** & **Uptime_hms:** The exact file and second the flicker occurred.
@@ -208,6 +251,8 @@ The output will look like this:
 * **Min_Ratio_Pct:** The lowest fast-vs-slow ratio seen that second. Lower numbers mean deeper dips.
 * **Dip_Sample_Count / Dip_ms:** How much of that second was under dip threshold, in samples and milliseconds.
 * **Human_Visibility_Score:** 0-100 heuristic score to prioritize likely noticeable events.
+* **flicker-fft-period-spectrum-address-N.png:** Per-address FFT period plots so you can spot periodic flicker spacing (for example near 63 minutes).
+* **Peak-Interval Flickers table:** Timestamp pairs whose spacing is close to the dominant FFT period for that address.
 
 ## Validation
 
@@ -215,6 +260,6 @@ The repository includes a single `test.sh` harness that exercises the important 
 
 - `arduino-cli compile --fqbn arduino:avr:uno` verifies the sketch builds for the Uno and fits within flash and SRAM limits.
 - `make -C sim test` builds and runs the native C simulator against synthetic flicker scenarios.
-- The R scripts are parsed and run against generated firmware-style CSV data, including a rollover boundary case.
+- The R scripts are parsed and run against generated firmware-style CSV data, including FFT plot generation and a rollover boundary case.
 
 If you want to validate only the simulator, run `make -C sim test` from the repo root.

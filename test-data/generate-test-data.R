@@ -3,8 +3,8 @@ library(dplyr)
 
 set.seed(42)
 
-# 75 minutes = 4500 seconds
-total_seconds <- 4500
+# 315 minutes = 18900 seconds (aligns exactly with 63-min and 45-min FFT bins)
+total_seconds <- 18900
 
 make_address_stream <- function(address_value, seconds_total) {
   dip_samples <- sample(0:5, seconds_total, replace = TRUE)
@@ -38,19 +38,19 @@ inject_flickers <- function(df, flicker_seconds, baseline_values, flicker_counts
 addr0 <- make_address_stream(0L, total_seconds)
 addr0 <- inject_flickers(
   addr0,
-  flicker_seconds = c(300, 4080),
-  baseline_values = c(450, 420),
-  flicker_counts = c(1L, 2L),
-  min_ratios = c(64L, 58L)
+  flicker_seconds = seq(300, by = 3780, length.out = 5),
+  baseline_values = c(450, 430, 420, 415, 425),
+  flicker_counts = c(1L, 1L, 2L, 1L, 2L),
+  min_ratios = c(64L, 62L, 58L, 60L, 57L)
 )
 
 addr1 <- make_address_stream(1L, total_seconds)
 addr1 <- inject_flickers(
   addr1,
-  flicker_seconds = c(900, 3600),
-  baseline_values = c(430, 410),
-  flicker_counts = c(1L, 1L),
-  min_ratios = c(61L, 55L)
+  flicker_seconds = seq(900, by = 2700, length.out = 7),
+  baseline_values = c(430, 420, 410, 405, 412, 409, 407),
+  flicker_counts = c(1L, 1L, 1L, 2L, 1L, 1L, 2L),
+  min_ratios = c(61L, 59L, 55L, 54L, 57L, 56L, 53L)
 )
 
 test_data <- bind_rows(addr0, addr1) |>
@@ -58,4 +58,3 @@ test_data <- bind_rows(addr0, addr1) |>
 
 write_csv(test_data, "LOG_000.CSV")
 cat("Success: LOG_000.CSV generated with dual-address firmware-style test data\n")
-

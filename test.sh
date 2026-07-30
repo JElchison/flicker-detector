@@ -190,7 +190,7 @@ run_generated_data_analysis() {
         return 1
     fi
 
-    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/summarize-firmware-flicker-logs.R'" | tee "$output_file"; then
+    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/analyze-firmware-flicker-logs.R'" | tee "$output_file"; then
         rm -f "$output_file"
         rm -rf "$tmpdir"
         return 1
@@ -198,6 +198,88 @@ run_generated_data_analysis() {
 
     if ! grep -q "Flicker_Count" "$output_file"; then
         echo "No firmware flicker rows detected in generated test data."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "FFT plot saved:" "$output_file"; then
+        echo "FFT plot output was not reported by the analyzer."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if [[ ! -f "$tmpdir/flicker-fft-period-spectrum-address-0.png" ]]; then
+        echo "Per-address FFT plot file for address 0 was not created."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if [[ ! -f "$tmpdir/flicker-fft-period-spectrum-address-1.png" ]]; then
+        echo "Per-address FFT plot file for address 1 was not created."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "Peak-Interval Flickers" "$output_file"; then
+        echo "Peak-interval flicker table was not printed."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "Address 0 Peak-Interval Flickers (63.000 min)" "$output_file"; then
+        echo "Expected 63-minute peak interval for Address 0 was not detected."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    rm -f "$output_file"
+    rm -rf "$tmpdir"
+    return 0
+}
+
+run_legacy_schema_analysis() {
+    local tmpdir
+    local output_file
+
+    tmpdir="$(mktemp -d)"
+    output_file="$(mktemp)"
+
+    cat > "$tmpdir/LOG_000.CSV" <<'CSV'
+Uptime_s,Address,Min_Light,Max_Light,Avg_Light,Read_Count,Window_Count
+1,0,594,633,613,3873,92
+2,0,593,632,612,3870,92
+1,1,601,640,620,3860,92
+2,1,600,639,619,3862,92
+CSV
+
+    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/analyze-firmware-flicker-logs.R'" | tee "$output_file"; then
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "Backfilled Human_Visibility_Score" "$output_file"; then
+        echo "Legacy schema run did not report HVS backfill."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "No flickers detected." "$output_file"; then
+        echo "Legacy schema run should report no detected flickers."
+        rm -f "$output_file"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if ! grep -q "No FFT spectrum could be computed from available data." "$output_file"; then
+        echo "Legacy schema run should skip FFT output when no events exist."
         rm -f "$output_file"
         rm -rf "$tmpdir"
         return 1
@@ -228,7 +310,7 @@ Uptime_s,Address,Baseline_Light,Read_Count,Flicker_Count,Min_Ratio_Pct,Dip_Sampl
 86403,0,810,3200,0,100,0,0,0
 CSV
 
-    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/summarize-firmware-flicker-logs.R'" | tee "$output_file"; then
+    if ! bash -c "cd '$tmpdir' && Rscript --vanilla '$SCRIPT_DIR/analyze-firmware-flicker-logs.R'" | tee "$output_file"; then
         rm -f "$output_file"
         rm -rf "$tmpdir"
         return 1
@@ -305,6 +387,8 @@ if command -v Rscript >/dev/null 2>&1; then
         run_generate_test_data
     run_check "analyze generated test data" \
         run_generated_data_analysis
+    run_check "analyze legacy schema test data" \
+        run_legacy_schema_analysis
     run_check "analyze rollover boundary test data" \
         run_rollover_boundary_analysis
 
