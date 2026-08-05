@@ -4,8 +4,8 @@ suppressPackageStartupMessages(library(purrr))
 
 
 # The Arduino now detects flickers in real time. This script is a lightweight
-# viewer for the firmware's summary CSVs, so archived logs are easier to inspect
-# without re-running any DSP on the host.
+# viewer for firmware summary CSVs so archived logs can be inspected without
+# re-running raw photodiode-domain detection on the host.
 
 # Modern firmware summary schema (event-aware rows).
 modern_required_cols <- c(
@@ -30,6 +30,8 @@ legacy_required_cols <- c(
 SAMPLE_RATE_HZ <- 3200L
 MIN_IGNORED_DIP_MS <- 6L
 MAX_IGNORED_MIN_RATIO_PCT <- 70L
+# Shared period-domain ceiling used by FFT peak search and diagnostics plots.
+PREFERRED_MAX_PERIOD_MINUTES <- 90
 
 result_cols <- c(
   "filename",
@@ -157,7 +159,7 @@ load_one_log <- function(file) {
 }
 
 load_logs <- function() {
-  file_list <- list.files(pattern = "^LOG_[0-9]{3}\\.CSV$", full.names = TRUE)
+  file_list <- list.files(pattern = "\\.CSV$", full.names = TRUE)
 
   if (length(file_list) == 0) {
     stop("No LOG_XXX.CSV files found in the current directory.")
@@ -191,6 +193,8 @@ build_fft_signal <- function(address_df, address_events_df) {
     return(NULL)
   }
 
+  # Build a 1 Hz impulse train over uptime so sparse events can be analyzed
+  # in a uniform FFT/ACF frame.
   signal_seconds <- seq.int(from = uptime_min, to = uptime_max, by = 1)
   signal_hvs <- numeric(length(signal_seconds))
 
@@ -252,7 +256,7 @@ compute_fft_period_spectrum <- function(address_df, address_events_df, address_v
   )
 }
 
-find_peak_period <- function(spectrum_df, preferred_min_minutes = 10, preferred_max_minutes = 75) {
+find_peak_period <- function(spectrum_df, preferred_min_minutes = 10, preferred_max_minutes = PREFERRED_MAX_PERIOD_MINUTES) {
   candidate_df <- spectrum_df |>
     filter(
       is.finite(.data$period_minutes),
@@ -280,6 +284,79 @@ find_peak_period <- function(spectrum_df, preferred_min_minutes = 10, preferred_
   candidate_df |>
     arrange(desc(.data$period_minutes), desc(.data$amplitude)) |>
     slice(1)
+}
+
+is_harmonic_of_period <- function(fundamental_period, candidate_period, max_order = 8, rel_tolerance = 0.06) {
+  if (!is.finite(fundamental_period) || !is.finite(candidate_period) ||
+      fundamental_period <= 0 || candidate_period <= 0 ||
+      candidate_period > fundamental_period) {
+    return(FALSE)
+  }
+
+  ratio <- fundamental_period / candidate_period
+  harmonic_order <- round(ratio)
+  if (harmonic_order < 1 || harmonic_order > max_order) {
+    return(FALSE)
+  }
+
+  abs(ratio - harmonic_order) <= (rel_tolerance * harmonic_order)
+}
+
+pick_fundamental_peaks <- function(candidate_tbl, max_fundamentals = 3, min_family_amplitude_ratio = 0.12) {
+  if (nrow(candidate_tbl) == 0) {
+    return(tibble())
+  }
+
+  # Longer periods are evaluated first so shorter integer-multiple periods are
+  # grouped as harmonics under the same family.
+  ordered_tbl <- candidate_tbl |>
+    arrange(desc(.data$period_minutes), desc(.data$amplitude))
+
+  consumed <- rep(FALSE, nrow(ordered_tbl))
+  families <- vector("list", 0)
+
+  for (idx in seq_len(nrow(ordered_tbl))) {
+    if (consumed[[idx]]) {
+      next
+    }
+
+    leader_period <- ordered_tbl$period_minutes[[idx]]
+    harmonic_idx <- which(!consumed & vapply(
+      ordered_tbl$period_minutes,
+      function(period_value) {
+        is_harmonic_of_period(leader_period, period_value)
+      },
+      logical(1)
+    ))
+
+    consumed[harmonic_idx] <- TRUE
+    family_tbl <- ordered_tbl[harmonic_idx, , drop = FALSE]
+
+    families[[length(families) + 1]] <- tibble(
+      period_minutes = leader_period,
+      amplitude = ordered_tbl$amplitude[[idx]],
+      frequency_hz = ordered_tbl$frequency_hz[[idx]],
+      family_amplitude = sum(family_tbl$amplitude, na.rm = TRUE),
+      family_match_count = sum(family_tbl$match_count, na.rm = TRUE),
+      harmonic_member_count = nrow(family_tbl)
+    )
+  }
+
+  family_tbl <- bind_rows(families)
+  if (nrow(family_tbl) == 0) {
+    return(tibble())
+  }
+
+  strongest_family <- max(family_tbl$family_amplitude, na.rm = TRUE)
+  if (is.finite(strongest_family) && strongest_family > 0) {
+    # Keep only families with enough energy relative to the strongest family.
+    family_tbl <- family_tbl |>
+      filter(.data$family_amplitude >= (strongest_family * min_family_amplitude_ratio))
+  }
+
+  family_tbl |>
+    arrange(desc(.data$family_amplitude), desc(.data$family_match_count), desc(.data$period_minutes)) |>
+    slice_head(n = max_fundamentals)
 }
 
 collect_peak_interval_matches <- function(address_events_df, peak_period_minutes, pair_mode = "all") {
@@ -353,8 +430,9 @@ find_peak_period_with_matches <- function(
   spectrum_df,
   address_events_df,
   preferred_min_minutes = 10,
-  preferred_max_minutes = 75,
-  max_candidates = 60
+  preferred_max_minutes = PREFERRED_MAX_PERIOD_MINUTES,
+  max_candidates = 60,
+  max_fundamentals = 3
 ) {
   max_flicker_period_minutes <- if (nrow(address_events_df) > 0) {
     max(address_events_df$Uptime_s, na.rm = TRUE) / 60
@@ -396,7 +474,8 @@ find_peak_period_with_matches <- function(
     return(list(
       peak_row = base_peak,
       interval_table = base_table,
-      match_count = nrow(base_table)
+      match_count = nrow(base_table),
+      fundamental_rows = base_peak
     ))
   }
 
@@ -417,15 +496,54 @@ find_peak_period_with_matches <- function(
   }
 
   if (length(matched_candidates) > 0) {
-    score_tbl <- tibble(
+    matched_tbl <- tibble(
       idx = seq_along(matched_candidates),
-      match_count = vapply(matched_candidates, function(x) x$match_count, numeric(1)),
-      amplitude = vapply(matched_candidates, function(x) x$peak_row$amplitude[[1]], numeric(1))
-    ) |>
-      arrange(desc(.data$amplitude), desc(.data$match_count))
+      period_minutes = vapply(matched_candidates, function(x) x$peak_row$period_minutes[[1]], numeric(1)),
+      amplitude = vapply(matched_candidates, function(x) x$peak_row$amplitude[[1]], numeric(1)),
+      frequency_hz = vapply(matched_candidates, function(x) x$peak_row$frequency_hz[[1]], numeric(1)),
+      match_count = vapply(matched_candidates, function(x) x$match_count, numeric(1))
+    )
+
+    fundamental_tbl <- pick_fundamental_peaks(
+      matched_tbl,
+      max_fundamentals = max_fundamentals,
+      min_family_amplitude_ratio = 0.12
+    )
+
+    if (nrow(fundamental_tbl) > 0) {
+      # Return the strongest fundamental family as the primary peak used by
+      # downstream interval matching tables.
+      primary_period <- fundamental_tbl$period_minutes[[1]]
+      primary_match <- matched_candidates[[matched_tbl$idx[[which.min(abs(matched_tbl$period_minutes - primary_period))]]]]
+
+      primary_row <- primary_match$peak_row
+      primary_table <- primary_match$interval_table
+      primary_count <- primary_match$match_count
+
+      return(list(
+        peak_row = primary_row,
+        interval_table = primary_table,
+        match_count = primary_count,
+        fundamental_rows = fundamental_tbl
+      ))
+    }
+
+    score_tbl <- matched_tbl |>
+      arrange(desc(.data$amplitude), desc(.data$match_count), desc(.data$period_minutes))
 
     best_idx <- score_tbl$idx[[1]]
-    return(matched_candidates[[best_idx]])
+    best_match <- matched_candidates[[best_idx]]
+    best_match$fundamental_rows <- score_tbl |>
+      slice(1) |>
+      transmute(
+        period_minutes = .data$period_minutes,
+        amplitude = .data$amplitude,
+        frequency_hz = .data$frequency_hz,
+        family_amplitude = .data$amplitude,
+        family_match_count = .data$match_count,
+        harmonic_member_count = 1
+      )
+    return(best_match)
   }
 
   base_table <- collect_peak_interval_matches(address_events_df, base_peak$period_minutes[[1]], pair_mode = "all")
@@ -433,7 +551,8 @@ find_peak_period_with_matches <- function(
   list(
     peak_row = base_peak,
     interval_table = base_table,
-    match_count = nrow(base_table)
+    match_count = nrow(base_table),
+    fundamental_rows = base_peak
   )
 }
 
@@ -480,7 +599,7 @@ plot_fft_period_spectrum <- function(
     return(invisible(NULL))
   }
 
-  x_max <- max(75, ceiling(max(plot_df$period_minutes, na.rm = TRUE)))
+  x_max <- max(PREFERRED_MAX_PERIOD_MINUTES, ceiling(max(plot_df$period_minutes, na.rm = TRUE)))
   y_max <- max(plot_df$amplitude, na.rm = TRUE)
   if (!is.finite(y_max) || y_max <= 0) {
     y_max <- 1
@@ -538,22 +657,32 @@ plot_fft_period_spectrum <- function(
     )
 
     if (!is.null(selected_peaks_df) && nrow(selected_peaks_df) > 0) {
-      peak_row <- selected_peaks_df |>
+      peak_rows <- selected_peaks_df |>
         filter(.data$Address == address_value)
 
-      if (nrow(peak_row) > 0) {
-        peak_x <- peak_row$period_minutes[[1]]
-        peak_y <- peak_row$amplitude[[1]]
+      if (nrow(peak_rows) > 0) {
+        peak_rows <- peak_rows |>
+          arrange(desc(.data$amplitude))
 
-        points(peak_x, peak_y, pch = 8, cex = 1.2, lwd = 1.5, col = "black")
-        abline(v = peak_x, col = "black", lty = 2)
-        text(
-          x = peak_x,
-          y = min(y_max * 1.02, peak_y + (0.06 * y_max)),
-          labels = sprintf("Peak %.3f min", peak_x),
-          pos = 4,
-          cex = 0.85
-        )
+        for (label_idx in seq_len(nrow(peak_rows))) {
+          peak_x <- peak_rows$period_minutes[[label_idx]]
+          peak_y <- peak_rows$amplitude[[label_idx]]
+          peak_hz <- peak_rows$frequency_hz[[label_idx]]
+
+          points(peak_x, peak_y, pch = 8, cex = 1.2, lwd = 1.5, col = "black")
+          abline(v = peak_x, col = "black", lty = 2)
+
+          label_pos <- if (label_idx %% 2 == 0) 2 else 4
+          label_y <- min(y_max * 1.02, peak_y + ((0.05 + (0.02 * ((label_idx - 1) %% 3))) * y_max))
+
+          text(
+            x = peak_x,
+            y = label_y,
+            labels = sprintf("Fund %.2f min (%.3f mHz)", peak_x, peak_hz * 1000),
+            pos = label_pos,
+            cex = 0.8
+          )
+        }
       }
     }
   }
@@ -595,6 +724,305 @@ plot_fft_period_spectrum <- function(
   cat("\nFFT plot saved:", paste(output_files, collapse = ", "), "\n")
   if (show_interactive && interactive()) {
     cat("FFT plot also rendered to the active interactive graphics device.\n")
+  }
+  invisible(output_files)
+}
+
+plot_frequency_diagnostics <- function(
+  df,
+  flicker_events,
+  spectrum_df,
+  selected_peaks_df = NULL,
+  output_file = "flicker-frequency-diagnostics.png",
+  max_period_minutes = PREFERRED_MAX_PERIOD_MINUTES,
+  show_interactive = TRUE
+) {
+  if (nrow(spectrum_df) == 0) {
+    cat("\nNo FFT spectrum data available for diagnostics plot.\n")
+    return(invisible(NULL))
+  }
+
+  address_ids <- sort(unique(spectrum_df$Address))
+  address_colors <- grDevices::hcl.colors(length(address_ids), "Dark 3")
+
+  make_output_filename <- function(address_value) {
+    if (grepl("\\.png$", output_file, ignore.case = TRUE)) {
+      base_file <- sub("\\.png$", "", output_file, ignore.case = TRUE)
+    } else {
+      base_file <- output_file
+    }
+
+    paste0(base_file, "-address-", address_value, ".png")
+  }
+
+  draw_no_data_panel <- function(title_text, body_text) {
+    plot.new()
+    title(main = title_text)
+    text(0.5, 0.5, body_text, cex = 0.95)
+  }
+
+  draw_address_diagnostics <- function(address_value, color_value) {
+    old_par <- par(no.readonly = TRUE)
+    on.exit(par(old_par), add = TRUE)
+
+    par(mfrow = c(3, 1), mar = c(4, 4, 2.6, 1), mgp = c(2.2, 0.7, 0), oma = c(0, 0, 1.2, 0))
+
+    address_df <- df |> filter(.data$Address == address_value)
+    address_events_df <- flicker_events |>
+      filter(.data$Address == address_value) |>
+      arrange(.data$Uptime_s)
+    signal_obj <- build_fft_signal(address_df, address_events_df)
+
+    peak_rows <- tibble()
+    if (!is.null(selected_peaks_df) && nrow(selected_peaks_df) > 0) {
+      peak_rows <- selected_peaks_df |>
+        filter(.data$Address == address_value) |>
+        arrange(desc(.data$amplitude))
+    }
+
+    # Panel 1: FFT magnitude in frequency space (uniform bin spacing).
+    address_spectrum <- spectrum_df |>
+      filter(
+        .data$Address == address_value,
+        is.finite(.data$frequency_hz),
+        .data$frequency_hz > 0
+      ) |>
+      arrange(.data$frequency_hz)
+
+    if (nrow(address_spectrum) == 0) {
+      draw_no_data_panel(
+        sprintf("Address %d FFT Magnitude", address_value),
+        "No FFT bins available"
+      )
+    } else {
+      x_cycles_per_hour <- address_spectrum$frequency_hz * 3600
+      y_amplitude <- address_spectrum$amplitude
+
+      x_max <- max(x_cycles_per_hour, na.rm = TRUE)
+      y_max <- max(y_amplitude, na.rm = TRUE)
+      if (!is.finite(x_max) || x_max <= 0) {
+        x_max <- 1
+      }
+      if (!is.finite(y_max) || y_max <= 0) {
+        y_max <- 1
+      }
+
+      plot(
+        x = x_cycles_per_hour,
+        y = y_amplitude,
+        type = "h",
+        xlim = c(0, x_max),
+        ylim = c(0, y_max * 1.08),
+        xlab = "Frequency (cycles/hour)",
+        ylab = "|FFT|",
+        main = sprintf("Address %d FFT Magnitude", address_value),
+        col = grDevices::adjustcolor(color_value, alpha.f = 0.45),
+        lwd = 1
+      )
+      points(
+        x = x_cycles_per_hour,
+        y = y_amplitude,
+        pch = 16,
+        cex = 0.25,
+        col = grDevices::adjustcolor(color_value, alpha.f = 0.65)
+      )
+      grid(nx = NA, ny = NULL, col = "grey88")
+
+      if (nrow(peak_rows) > 0) {
+        for (label_idx in seq_len(nrow(peak_rows))) {
+          peak_freq_cph <- peak_rows$frequency_hz[[label_idx]] * 3600
+          peak_y <- peak_rows$amplitude[[label_idx]]
+          peak_period <- peak_rows$period_minutes[[label_idx]]
+
+          points(peak_freq_cph, peak_y, pch = 8, cex = 1.1, lwd = 1.4, col = "black")
+          abline(v = peak_freq_cph, col = "black", lty = 2)
+          text(
+            x = peak_freq_cph,
+            y = min(y_max * 1.05, peak_y + (0.05 * y_max)),
+            labels = sprintf("Fund %.2f min", peak_period),
+            pos = if (label_idx %% 2 == 0) 2 else 4,
+            cex = 0.78
+          )
+        }
+      }
+    }
+
+    # Panel 2: Autocorrelation shows repeating lag structure directly.
+    if (is.null(signal_obj) || length(signal_obj$hvs) < 3 || all(signal_obj$hvs == 0)) {
+      draw_no_data_panel(
+        sprintf("Address %d Autocorrelation", address_value),
+        "Insufficient event signal for ACF"
+      )
+    } else {
+      centered_signal <- signal_obj$hvs - mean(signal_obj$hvs)
+      lag_limit <- min(length(centered_signal) - 1, as.integer(max_period_minutes * 60))
+
+      if (lag_limit < 2) {
+        draw_no_data_panel(
+          sprintf("Address %d Autocorrelation", address_value),
+          "Insufficient lag window for ACF"
+        )
+      } else {
+        acf_obj <- stats::acf(
+          centered_signal,
+          lag.max = lag_limit,
+          plot = FALSE,
+          demean = FALSE,
+          na.action = na.pass
+        )
+
+        lag_seconds <- as.numeric(acf_obj$lag)
+        lag_minutes <- lag_seconds / 60
+        acf_values <- as.numeric(acf_obj$acf)
+        valid_lags <- which(lag_seconds > 0)
+
+        plot(
+          x = lag_minutes[valid_lags],
+          y = acf_values[valid_lags],
+          type = "l",
+          lwd = 1.3,
+          col = color_value,
+          xlab = "Lag (minutes)",
+          ylab = "ACF",
+          main = sprintf("Address %d Autocorrelation", address_value)
+        )
+        abline(h = 0, col = "grey55", lty = 3)
+        grid(nx = NA, ny = NULL, col = "grey90")
+
+        # Label the strongest non-zero-lag peak in minutes.
+        positive_lag_idx <- valid_lags[acf_values[valid_lags] > 0]
+        acf_peak_idx <- if (length(positive_lag_idx) > 0) {
+          positive_lag_idx[[which.max(acf_values[positive_lag_idx])]]
+        } else if (length(valid_lags) > 0) {
+          valid_lags[[which.max(acf_values[valid_lags])]]
+        } else {
+          NA_integer_
+        }
+
+        if (is.finite(acf_peak_idx)) {
+          peak_lag_minutes <- lag_minutes[[acf_peak_idx]]
+          peak_acf_value <- acf_values[[acf_peak_idx]]
+
+          points(peak_lag_minutes, peak_acf_value, pch = 8, cex = 1.1, lwd = 1.3, col = "black")
+          text(
+            x = peak_lag_minutes,
+            y = peak_acf_value,
+            labels = sprintf("ACF peak %.2f min", peak_lag_minutes),
+            pos = 4,
+            cex = 0.78
+          )
+        }
+
+        if (nrow(peak_rows) > 0) {
+          for (peak_period in peak_rows$period_minutes) {
+            abline(v = peak_period, col = "black", lty = 2)
+          }
+        }
+      }
+    }
+
+    # Panel 3: Consecutive inter-event interval distribution.
+    event_uptime <- address_events_df$Uptime_s
+    event_uptime <- event_uptime[is.finite(event_uptime)]
+    event_uptime <- sort(unique(event_uptime))
+
+    if (length(event_uptime) < 2) {
+      draw_no_data_panel(
+        sprintf("Address %d Consecutive Intervals", address_value),
+        "Need at least 2 events for interval histogram"
+      )
+    } else {
+      interval_minutes_all <- diff(event_uptime) / 60
+      interval_minutes_all <- interval_minutes_all[
+        is.finite(interval_minutes_all) & interval_minutes_all > 0
+      ]
+
+      interval_minutes <- interval_minutes_all[
+        interval_minutes_all <= max_period_minutes
+      ]
+      omitted_interval_count <- length(interval_minutes_all) - length(interval_minutes)
+
+      if (length(interval_minutes) == 0) {
+        draw_no_data_panel(
+          sprintf("Address %d Consecutive Intervals", address_value),
+          if (omitted_interval_count > 0) {
+            sprintf("No intervals within %.1f min (%d above range)", max_period_minutes, omitted_interval_count)
+          } else {
+            "No positive consecutive intervals"
+          }
+        )
+      } else {
+        if (length(interval_minutes) == 1) {
+          span <- max(1, interval_minutes[[1]] * 0.2)
+          left_edge <- max(0, interval_minutes[[1]] - span)
+          right_edge <- min(max_period_minutes, interval_minutes[[1]] + span)
+          interval_breaks <- c(left_edge, right_edge)
+          if (interval_breaks[[2]] <= interval_breaks[[1]]) {
+            interval_breaks <- c(max(0, interval_minutes[[1]] - 0.5), min(max_period_minutes, interval_minutes[[1]] + 0.5))
+          }
+        } else {
+          max_bins <- max(8, min(36, floor(max_period_minutes / 3)))
+          interval_breaks <- seq(0, max_period_minutes, length.out = max_bins + 1)
+        }
+
+        hist(
+          interval_minutes,
+          breaks = interval_breaks,
+          xlim = c(0, max_period_minutes),
+          col = grDevices::adjustcolor(color_value, alpha.f = 0.45),
+          border = color_value,
+          xlab = "Interval (minutes)",
+          ylab = "Count",
+          main = sprintf("Address %d Consecutive Intervals", address_value)
+        )
+        grid(nx = NA, ny = NULL, col = "grey90")
+        rug(interval_minutes, col = grDevices::adjustcolor(color_value, alpha.f = 0.8), lwd = 1.2)
+
+        if (omitted_interval_count > 0) {
+          usr <- par("usr")
+          text(
+            x = usr[[2]] * 0.98,
+            y = usr[[4]] * 0.94,
+            labels = sprintf("%d interval(s) > %.1f min omitted", omitted_interval_count, max_period_minutes),
+            adj = c(1, 1),
+            cex = 0.75,
+            col = "grey35"
+          )
+        }
+
+        if (nrow(peak_rows) > 0) {
+          for (peak_period in peak_rows$period_minutes) {
+            abline(v = peak_period, col = "black", lty = 2)
+          }
+        }
+      }
+    }
+
+    mtext(sprintf("Address %d Frequency Diagnostics", address_value), side = 3, outer = TRUE, line = 0.2, cex = 1.0, font = 2)
+  }
+
+  if (show_interactive && interactive()) {
+    walk2(address_ids, address_colors, function(address_value, color_value) {
+      draw_address_diagnostics(address_value, color_value)
+    })
+  }
+
+  output_files <- character(0)
+  for (idx in seq_along(address_ids)) {
+    address_value <- address_ids[[idx]]
+    color_value <- address_colors[[idx]]
+    output_name <- make_output_filename(address_value)
+
+    grDevices::png(filename = output_name, width = 1500, height = 1800, res = 140)
+    draw_address_diagnostics(address_value, color_value)
+    grDevices::dev.off()
+
+    output_files <- c(output_files, output_name)
+  }
+
+  cat("\nFrequency diagnostics plot saved:", paste(output_files, collapse = ", "), "\n")
+  if (show_interactive && interactive()) {
+    cat("Frequency diagnostics also rendered to the active interactive graphics device.\n")
   }
   invisible(output_files)
 }
@@ -647,9 +1075,9 @@ if (nrow(fft_spectrum) == 0) {
   eligible_limits <- map_dfr(address_values, function(address_value) {
     address_events_df <- flicker_events |> filter(.data$Address == address_value)
     eligible_max_minutes <- if (nrow(address_events_df) > 0) {
-      min(75, max(address_events_df$Uptime_s, na.rm = TRUE) / 60)
+      min(PREFERRED_MAX_PERIOD_MINUTES, max(address_events_df$Uptime_s, na.rm = TRUE) / 60)
     } else {
-      75
+      PREFERRED_MAX_PERIOD_MINUTES
     }
 
     tibble(
@@ -665,31 +1093,58 @@ if (nrow(fft_spectrum) == 0) {
       address_spectrum,
       address_events_df,
       preferred_min_minutes = 10,
-      preferred_max_minutes = 75
+      preferred_max_minutes = PREFERRED_MAX_PERIOD_MINUTES
     )
   })
 
   selected_peaks <- map2_dfr(address_values, peak_results, function(address_value, peak_result) {
-    if (is.null(peak_result) || is.null(peak_result$peak_row)) {
+    if (is.null(peak_result)) {
       return(tibble())
     }
 
-    tibble(
-      Address = as.integer(address_value),
-      period_minutes = peak_result$peak_row$period_minutes[[1]],
-      amplitude = peak_result$peak_row$amplitude[[1]],
-      match_count = if (is.null(peak_result$match_count)) {
-        nrow(peak_result$interval_table)
-      } else {
-        as.integer(peak_result$match_count)
+    fundamental_rows <- peak_result$fundamental_rows
+    if (is.null(fundamental_rows) || nrow(fundamental_rows) == 0) {
+      if (is.null(peak_result$peak_row) || nrow(peak_result$peak_row) == 0) {
+        return(tibble())
       }
-    )
+
+      fundamental_rows <- peak_result$peak_row |>
+        transmute(
+          period_minutes = .data$period_minutes,
+          amplitude = .data$amplitude,
+          frequency_hz = .data$frequency_hz
+        )
+    }
+
+    match_count_value <- if (is.null(peak_result$match_count)) {
+      nrow(peak_result$interval_table)
+    } else {
+      as.integer(peak_result$match_count)
+    }
+
+    fundamental_rows |>
+      transmute(
+        Address = as.integer(address_value),
+        period_minutes = .data$period_minutes,
+        amplitude = .data$amplitude,
+        frequency_hz = .data$frequency_hz,
+        match_count = match_count_value
+      )
   })
 
   plot_fft_period_spectrum(
     fft_spectrum,
     selected_peaks_df = selected_peaks,
     eligible_limits_df = eligible_limits
+  )
+
+  plot_frequency_diagnostics(
+    df,
+    flicker_events,
+    fft_spectrum,
+    selected_peaks_df = selected_peaks,
+    output_file = "flicker-frequency-diagnostics.png",
+    max_period_minutes = PREFERRED_MAX_PERIOD_MINUTES
   )
 
   walk2(address_values, peak_results, function(address_value, peak_result) {

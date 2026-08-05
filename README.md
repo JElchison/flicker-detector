@@ -190,19 +190,28 @@ The easiest way to process your data is directly from your computer's terminal o
    ```
 
 ### Reading the Output
-The script stitches your `LOG_XXX.CSV` files together and now emits three analysis sections:
+The script stitches your `LOG_XXX.CSV` files together and now emits four analysis sections:
 
 1. A per-address flicker event dump (`Flicker_Count > 0`).
 2. FFT period-spectrum plots (one PNG per address) using:
   - x-axis: inferred period in minutes (from FFT frequency bins)
   - y-axis: FFT amplitude of the `Human_Visibility_Score` event signal
-3. A per-address table of timestamped flicker pairs that match that address's dominant FFT period.
+  - labels: fundamental peak candidates (harmonics grouped so labels prefer fundamentals)
+3. Frequency diagnostics plots (one PNG per address) with three panels:
+  - FFT magnitude vs frequency (cycles/hour) with fundamental labels
+  - autocorrelation vs lag (minutes) with strongest ACF peak label
+  - consecutive inter-event interval histogram (minutes)
+4. A per-address table of timestamped flicker pairs that match that address's selected peak period.
 
 By default, the script writes one file per address in the form `flicker-fft-period-spectrum-address-N.png`.
 
+It also writes one diagnostics image per address in the form `flicker-frequency-diagnostics-address-N.png`.
+
 If you run the script interactively (for example via `source()` inside RStudio), the same FFT plots are also rendered to the active graphics device while still being saved to PNG files.
 
-The FFT chart always includes at least a 0-75 minute domain, then extends to the right as far as the available capture length supports.
+In interactive sessions, diagnostics plots are also rendered to the active graphics device.
+
+The default preferred period window is 0-90 minutes (`PREFERRED_MAX_PERIOD_MINUTES`). Peak search, diagnostics lag range, and interval histogram range all honor this ceiling.
 
 The output will look like this:
 
@@ -225,7 +234,9 @@ The output will look like this:
  LOG_000.CSV    14400    4:00:00       1            409       3202             1            56              148     46                     68
  LOG_000.CSV    17100    4:45:00       1            407       3197             2            53              109     34                     53
 
-FFT plot saved: flicker-fft-period-spectrum-address-0.png, flicker-fft-period-spectrum-address-1.png 
+FFT plot saved: flicker-fft-period-spectrum-address-0.png, flicker-fft-period-spectrum-address-1.png
+
+Frequency diagnostics plot saved: flicker-frequency-diagnostics-address-0.png, flicker-frequency-diagnostics-address-1.png
 
 === Address 0 Peak-Interval Flickers (63.000 min) ===
     filename Uptime_hms Human_Visibility_Score Next_filename Next_Uptime_hms Next_Human_Visibility_Score Interval_minutes Peak_period_minutes
@@ -251,10 +262,13 @@ FFT plot saved: flicker-fft-period-spectrum-address-0.png, flicker-fft-period-sp
 * **Min_Ratio_Pct:** The lowest fast-vs-slow ratio seen that second. Lower numbers mean deeper dips.
 * **Dip_Sample_Count / Dip_ms:** How much of that second was under dip threshold, in samples and milliseconds.
 * **Human_Visibility_Score:** 0-100 heuristic score to prioritize likely noticeable events.
-* **flicker-fft-period-spectrum-address-N.png:** Per-address FFT period plots so you can spot periodic flicker spacing (for example near 63 minutes).
-* **Peak-Interval Flickers table:** Timestamp pairs whose spacing is close to the dominant FFT period for that address.
+* **flicker-fft-period-spectrum-address-N.png:** Per-address period-domain FFT view with labeled fundamental peaks.
+* **flicker-frequency-diagnostics-address-N.png:** Per-address three-panel frequency diagnostics (frequency-domain FFT, ACF, and consecutive-interval histogram).
+* **Peak-Interval Flickers table:** Timestamp pairs whose spacing is close to the selected (fundamental-preferred) period for that address.
 
 Generated FFT plots look like this (generated from the above sample data):
+
+The diagnostics PNGs are separate, taller 3-panel figures (`flicker-frequency-diagnostics-address-N.png`) and are generated alongside the FFT plots.
 
 <img width="1400" height="900" alt="flicker-fft-period-spectrum-address-0" src="https://github.com/user-attachments/assets/a80be437-5c94-4909-a5e8-6783b1937196" />
 
