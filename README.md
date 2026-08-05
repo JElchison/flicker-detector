@@ -114,7 +114,7 @@ Use two sensors so you can monitor two fixture points/channels at once. The logg
 * **SIG** -> Shield **A0** *(Analog In 0, logged as `Address=0`)*
 
 #### Sensor Address 1 (A1)
-* **VCC** -> Shield **5V**
+* **VCC** -> Shield **Pin 5** *(digital output driven HIGH in firmware)*
 * **GND** -> Shield **GND** *(Any shared GND is fine)*
 * **SIG** -> Shield **A1** *(Analog In 1, logged as `Address=1`)*
 

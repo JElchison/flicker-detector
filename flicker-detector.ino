@@ -41,6 +41,7 @@ const uint8_t MAX_IGNORED_MIN_RATIO_PCT = 70;
 // --- Hardware pins ----------------------------------------------------------
 const int chipSelect = 4;
 const int statusLed = 7;
+const int sensor2Vcc = 5;  // digital pin sourcing 5 V for the 2nd sensor
 const uint8_t SENSOR_COUNT = 2;
 const uint8_t sensorPins[SENSOR_COUNT] = {A0, A1};
 
@@ -469,6 +470,9 @@ void setup() {
   // Disable the Ethernet controller by pulling Pin 10 HIGH
   pinMode(10, OUTPUT);
   digitalWrite(10, HIGH);
+
+  pinMode(sensor2Vcc, OUTPUT);
+  digitalWrite(sensor2Vcc, HIGH);
 
   Serial.print("Initializing SD card...");
   if (!SD.begin(chipSelect)) {
